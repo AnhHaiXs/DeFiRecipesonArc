@@ -1,13 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { CheckCircle2, Loader2, Send, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, ExternalLink, Loader2, TriangleAlert } from 'lucide-react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useAccount, useBalance, useChainId, useSwitchChain, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
 import { parseUnits, isAddress } from 'viem';
 import { CONTRACT_ADDRESSES, ARC_TESTNET_CHAIN_ID } from '@/config/contracts';
 
-// USDC ERC-20 ABI — only the transfer function needed
 const USDC_TRANSFER_ABI = [
   {
     type: 'function',
@@ -21,11 +20,10 @@ const USDC_TRANSFER_ABI = [
   },
 ] as const;
 
-// Arc Testnet explorer
 const EXPLORER = 'https://testnet.arcscan.app';
 
-function formatAmount(v: string | bigint, decimals = 6): string {
-  const n = typeof v === 'bigint' ? Number(v) / 10 ** decimals : Number(v);
+function fmtBalance(v: string | number): string {
+  const n = typeof v === 'string' ? parseFloat(v) : v;
   if (!Number.isFinite(n)) return '0';
   return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
 }
@@ -49,30 +47,27 @@ export function SendPanel() {
   const { writeContract, data: txHash, isPending, error: writeError, reset: resetWrite } = useWriteContract();
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash: txHash });
 
-  const balance = balanceData ? Number(balanceData.value) / 10 ** balanceData.decimals : 0;
-  const amountNum = Number(amount);
-  const isOnArc = chainId === ARC_TESTNET_CHAIN_ID;
+  const balance    = balanceData ? Number(balanceData.value) / 10 ** balanceData.decimals : 0;
+  const amountNum  = Number(amount);
+  const isOnArc    = chainId === ARC_TESTNET_CHAIN_ID;
 
   const recipientValid = isAddress(recipient);
   const amountValid    = /^\d*\.?\d+$/.test(amount.trim()) && amountNum > 0;
   const sufficientBal  = amountValid && amountNum <= balance;
   const canSend        = isConnected && recipientValid && amountValid && sufficientBal && !isPending && !isConfirming;
 
-  // Reflect write error and confirmation in notice via effects (no setState in render body)
   useEffect(() => {
-    if (writeError) {
-      setNotice({ type: 'error', text: writeError.message.split('\n')[0] });
-    }
+    if (writeError) setNotice({ type: 'error', text: writeError.message.split('\n')[0] });
   }, [writeError]);
 
   useEffect(() => {
     if (isConfirmed && txHash) {
-      setNotice({ type: 'success', text: `Sent! Tx: ${txHash.slice(0, 10)}…` });
+      setNotice({ type: 'success', text: `Sent ${amount} USDC successfully.` });
       setAmount('');
       setRecipient('');
       resetWrite();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConfirmed, txHash]);
 
   async function handleSend() {
@@ -84,7 +79,7 @@ export function SendPanel() {
       try {
         await switchChainAsync({ chainId: ARC_TESTNET_CHAIN_ID });
       } catch {
-        setNotice({ type: 'error', text: 'Please switch to Arc Testnet in your wallet.' });
+        setNotice({ type: 'error', text: 'Switch to Arc Testnet failed.' });
         setSwitching(false);
         return;
       }
@@ -102,93 +97,111 @@ export function SendPanel() {
   const busy = isPending || isConfirming || switching;
 
   return (
-    <section className="glass-card p-5 sm:p-6">
-      <div className="mb-5">
-        <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Same-chain transfer</p>
-        <h3 className="mt-1 text-2xl font-bold text-white">Send USDC</h3>
-        <p className="mt-1 text-sm text-slate-400">Transfer USDC to any address on Arc Testnet.</p>
+    <section className="glass-card overflow-hidden">
+      {/* Header */}
+      <div className="border-b px-5 py-4" style={{ borderColor: 'var(--border)' }}>
+        <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">Same-chain transfer</p>
+        <h3 className="display mt-1 text-xl font-semibold text-ink">Send USDC</h3>
+        <p className="mt-1 text-sm text-muted">Transfer USDC to any address on Arc Testnet.</p>
       </div>
 
-      {notice && (
-        <div className={`mb-4 flex items-start gap-2 rounded-xl border px-3 py-2 text-sm ${
-          notice.type === 'success'
-            ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200'
-            : 'border-rose-800 bg-rose-950/40 text-rose-200'
-        }`}>
-          {notice.type === 'success'
-            ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-            : <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />}
-          <div className="flex-1">
-            <span>{notice.text}</span>
-            {notice.type === 'success' && txHash && (
-              <a
-                href={`${EXPLORER}/tx/${txHash}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="ml-2 text-emerald-300 underline"
-              >
-                View on explorer
-              </a>
-            )}
+      <div className="p-5 space-y-4">
+        {/* Chain warning */}
+        {!isOnArc && isConnected && (
+          <div className="flex items-center gap-2.5 rounded-xl border px-3.5 py-2.5 text-sm" style={{ borderColor: 'rgba(242,153,74,0.30)', background: 'var(--warning-bg)', color: 'var(--warning)' }}>
+            <TriangleAlert className="h-4 w-4 shrink-0" />
+            <span>Not on Arc Testnet — will switch automatically.</span>
           </div>
-        </div>
-      )}
+        )}
 
-      {!isOnArc && isConnected && (
-        <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-700 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
-          <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-          <span>You are not on Arc Testnet. The send button will switch networks automatically.</span>
-        </div>
-      )}
+        {/* Notice */}
+        {notice && (
+          <div className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-3 text-sm ${
+            notice.type === 'success' ? 'border-success/25 bg-success/8 text-success' : 'border-danger/25 bg-danger/8 text-danger'
+          }`}>
+            {notice.type === 'success'
+              ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+              : <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />}
+            <div className="flex-1 min-w-0">
+              <span>{notice.text}</span>
+              {notice.type === 'success' && txHash && (
+                <a
+                  href={`${EXPLORER}/tx/${txHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 flex items-center gap-1 text-xs underline"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  View on ArcScan
+                </a>
+              )}
+            </div>
+          </div>
+        )}
 
-      <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
         {/* Recipient */}
         <div>
-          <label className="mb-1.5 block text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">Recipient</label>
+          <label className="block mb-1.5 text-[11px] font-semibold uppercase tracking-[0.10em] text-muted">Recipient</label>
           <input
             value={recipient}
             onChange={e => { setRecipient(e.target.value); setNotice(null); }}
             placeholder="0x..."
             spellCheck={false}
-            className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 font-mono text-sm text-slate-100 placeholder:text-slate-500 outline-none focus:border-blue-500"
+            className="mono w-full rounded-xl px-3.5 py-2.5 text-sm text-ink placeholder:text-subtle outline-none"
+            style={{ background: 'var(--surface-inner)', border: `1px solid ${recipient && !recipientValid ? 'var(--danger)' : 'var(--border)'}` }}
           />
           {recipient && !recipientValid && (
-            <p className="mt-1 text-xs text-rose-400">Invalid address</p>
+            <p className="mt-1.5 text-xs" style={{ color: 'var(--danger)' }}>Invalid address</p>
           )}
         </div>
 
         {/* Amount */}
         <div>
-          <div className="mb-1.5 flex items-center justify-between">
-            <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">Amount (USDC)</label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-[11px] font-semibold uppercase tracking-[0.10em] text-muted">Amount</label>
             <button
               type="button"
-              className="text-[11px] text-slate-400 hover:text-white disabled:opacity-40"
               disabled={balance === 0}
               onClick={() => setAmount(String(balance))}
+              className="text-xs font-medium transition-colors disabled:opacity-40"
+              style={{ color: 'var(--accent)' }}
             >
-              Max: {formatAmount(balance.toString())} USDC
+              Balance: {fmtBalance(balance)} · Max
             </button>
           </div>
-          <input
-            inputMode="decimal"
-            value={amount}
-            onChange={e => { setAmount(e.target.value); setNotice(null); }}
-            placeholder="0.00"
-            className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 outline-none focus:border-blue-500"
-          />
+          <div className={`flex items-center gap-2 rounded-xl px-3.5 py-3 ${amountValid && !sufficientBal ? 'border-danger/60' : ''}`}
+            style={{ background: 'var(--surface-inner)', border: `1px solid ${amountValid && !sufficientBal ? 'var(--danger)' : 'var(--border)'}` }}
+          >
+            <input
+              inputMode="decimal"
+              value={amount}
+              onChange={e => { setAmount(e.target.value); setNotice(null); }}
+              placeholder="0.00"
+              className="display flex-1 bg-transparent text-2xl font-semibold tabular-nums text-ink placeholder:text-subtle outline-none"
+            />
+            <span className="mono text-sm font-medium text-muted shrink-0">USDC</span>
+          </div>
           {amountValid && !sufficientBal && (
-            <p className="mt-1 text-xs text-rose-400">Insufficient balance</p>
+            <p className="mt-1.5 text-xs" style={{ color: 'var(--danger)' }}>Insufficient balance</p>
           )}
         </div>
 
         {/* Summary */}
         {recipientValid && amountValid && sufficientBal && (
-          <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3 text-xs text-slate-300 space-y-1.5">
-            <div className="flex justify-between"><span className="text-slate-400">Sending</span><span className="font-semibold text-white">{amount} USDC</span></div>
-            <div className="flex justify-between"><span className="text-slate-400">To</span><span className="font-mono">{recipient.slice(0,6)}…{recipient.slice(-4)}</span></div>
-            <div className="flex justify-between"><span className="text-slate-400">Network</span><span>Arc Testnet</span></div>
-            <div className="flex justify-between"><span className="text-slate-400">Gas</span><span>Paid in USDC</span></div>
+          <div className="rounded-xl p-3.5 space-y-2" style={{ background: 'var(--surface-inner)', border: '1px solid var(--border)' }}>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.10em] text-muted mb-2.5">Review</p>
+            {[
+              ['Sending',  `${amount} USDC`],
+              ['To',       `${recipient.slice(0,6)}…${recipient.slice(-4)}`],
+              ['Network',  'Arc Testnet'],
+              ['Gas',      'Paid in USDC'],
+            ].map(([k, v]) => (
+              <div key={k} className="flex justify-between text-sm">
+                <span className="text-muted">{k}</span>
+                <span className="mono text-ink font-medium">{v}</span>
+              </div>
+            ))}
           </div>
         )}
 
@@ -200,19 +213,19 @@ export function SendPanel() {
             type="button"
             disabled={!canSend || busy}
             onClick={handleSend}
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-base font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex w-full items-center justify-center gap-2 rounded-2xl py-3.5 text-sm font-semibold transition-all hover:scale-[1.01] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
+            style={{ background: 'var(--accent)', color: '#0d1b2f' }}
           >
             {busy
-              ? <><Loader2 className="h-4 w-4 animate-spin" />{switching ? 'Switching chain…' : isConfirming ? 'Confirming…' : 'Sending…'}</>
-              : <><Send className="h-4 w-4" /> Send USDC</>
-            }
+              ? <><Loader2 className="h-4 w-4 animate-spin" />{switching ? 'Switching…' : isConfirming ? 'Confirming…' : 'Sending…'}</>
+              : 'Send USDC'}
           </button>
         )}
       </div>
 
-      <p className="mt-3 text-center text-xs text-slate-500">
-        Arc Testnet · USDC as gas · Get test USDC from <a href="https://faucet.circle.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">faucet.circle.com</a>
-      </p>
+      <div className="px-5 py-3 border-t text-center text-[11px] text-subtle" style={{ borderColor: 'var(--border)' }}>
+        Arc Testnet · USDC as gas · Get test USDC from the sidebar faucet
+      </div>
     </section>
   );
 }

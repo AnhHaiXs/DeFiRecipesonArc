@@ -244,11 +244,11 @@ export function SwapPanel() {
   return (
     <section className="glass-card p-5 sm:p-6">
       {SWAP_REQUIRES_MAINNET ? (
-        <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-700 bg-amber-950/40 px-4 py-3 text-sm text-amber-200">
-          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+        <div className="mb-4 flex items-start gap-2.5 rounded-xl border px-4 py-3 text-sm" style={{ borderColor: 'rgba(242,153,74,0.30)', background: 'var(--warning-bg)', color: 'var(--warning)' }}>
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
-            USDC ↔ EURC swaps require <strong>Arc mainnet</strong> — the liquidity provider has no testnet route for this pair.
-            Set <code className="rounded bg-amber-900/60 px-1">NEXT_PUBLIC_ARC_CHAIN=Arc</code> to enable swapping on mainnet.
+            USDC ↔ EURC swaps require <strong>Arc mainnet</strong> — the liquidity provider has no testnet route.
+            Set <code className="rounded px-1 text-xs" style={{ background: 'rgba(242,153,74,0.15)' }}>NEXT_PUBLIC_ARC_CHAIN=Arc</code> to enable.
           </span>
         </div>
       ) : null}

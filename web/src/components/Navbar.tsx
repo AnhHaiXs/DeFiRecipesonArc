@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import React, { useEffect, useRef, useState } from 'react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { ArrowRight, ChevronDown, Menu, X, Zap } from 'lucide-react';
+import { ArrowUpRight, ChevronDown, Menu, Repeat2, X, Zap } from 'lucide-react';
 import { useChainId } from 'wagmi';
 import { usePathname } from 'next/navigation';
 import { useLanguage } from '@/lib/i18n/LanguageProvider';
@@ -11,25 +11,51 @@ import { useLanguage } from '@/lib/i18n/LanguageProvider';
 const ARC_CHAIN_ID = 5042002;
 
 const APP_KIT_ITEMS = [
-  { href: '/swap',            label: 'Swap',            desc: 'USDC ↔ EURC via LiFi' },
-  { href: '/bridge',          label: 'Bridge',          desc: 'Cross-chain via CCTP' },
-  { href: '/send',            label: 'Send',            desc: 'Same-chain USDC transfer' },
-  { href: '/unified-balance', label: 'Unified Balance', desc: 'Cross-chain balance' },
+  {
+    href:    '/swap',
+    label:   'Swap',
+    desc:    'USDC ↔ EURC via App Kit',
+    icon:    <Repeat2 className="h-4 w-4" />,
+    accent:  'text-blue-300',
+  },
+  {
+    href:    '/bridge',
+    label:   'Bridge',
+    desc:    'Cross-chain via CCTP',
+    icon:    <ArrowUpRight className="h-4 w-4" />,
+    accent:  'text-emerald-300',
+  },
+  {
+    href:    '/send',
+    label:   'Send',
+    desc:    'Same-chain USDC transfer',
+    icon:    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/></svg>,
+    accent:  'text-violet-300',
+  },
+  {
+    href:    '/unified-balance',
+    label:   'Unified Balance',
+    desc:    'Cross-chain USDC pool',
+    icon:    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>,
+    accent:  'text-cyan-300',
+  },
 ] as const;
+
+const APP_KIT_PATHS = APP_KIT_ITEMS.map(i => i.href);
 
 export const Navbar: React.FC = () => {
   const chainId    = useChainId();
   const pathname   = usePathname();
-  const isArcChain = chainId === ARC_CHAIN_ID;
   const { lang, setLang, t } = useLanguage();
-
-  const [mobileOpen,  setMobileOpen]  = useState(false);
-  const [kitOpen,     setKitOpen]     = useState(false);
-  const [mobileKitOpen, setMobileKitOpen] = useState(false);
-
+  const [mobileOpen,   setMobileOpen]   = useState(false);
+  const [kitOpen,      setKitOpen]      = useState(false);
+  const [kitMobOpen,   setKitMobOpen]   = useState(false);
   const kitRef = useRef<HTMLDivElement>(null);
 
-  // Close desktop dropdown on outside click / Escape
+  const isArc      = chainId === ARC_CHAIN_ID;
+  const kitActive  = APP_KIT_PATHS.some(p => pathname?.startsWith(p));
+
+  // Close dropdown on outside click / Escape
   useEffect(() => {
     if (!kitOpen) return;
     function onDown(e: MouseEvent) {
@@ -46,96 +72,105 @@ export const Navbar: React.FC = () => {
     };
   }, [kitOpen]);
 
-  // Is any App Kit route currently active?
-  const kitActive = APP_KIT_ITEMS.some(item => pathname.startsWith(item.href));
-
-  function linkClass(href: string) {
-    const active = href === '/' ? pathname === '/' : pathname.startsWith(href);
-    return active
-      ? 'rounded-lg border border-blue-600 bg-blue-950/70 px-3 py-1.5 text-xs font-semibold text-blue-200'
-      : 'rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-blue-500 hover:text-white';
-  }
+  // Close mobile menu on route change
+  useEffect(() => { setMobileOpen(false); }, [pathname]);
 
   return (
-    <header className="sticky top-0 z-50 glass-card rounded-none border-b border-cardBorder">
-      <div className="flex items-center justify-between px-4 py-3 sm:px-6">
+    <header className="sticky top-0 z-50" style={{ background: 'rgba(13,27,47,0.85)', backdropFilter: 'blur(20px) saturate(160%)', borderBottom: '1px solid var(--border)' }}>
+      <div className="flex items-center justify-between px-4 py-3 sm:px-6 max-w-7xl mx-auto">
 
         {/* Logo */}
-        <Link href="/" className="flex items-center space-x-3">
-          <div className="h-9 w-9 shrink-0 rounded-xl bg-gradient-to-tr from-blue-600 to-emerald-400 flex items-center justify-center shadow-lg shadow-blue-500/20">
-            <Zap className="h-5 w-5 text-white" />
+        <Link href="/" className="flex items-center gap-2.5 shrink-0">
+          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-tr from-blue-500 to-emerald-400 shadow-glow-sm">
+            <Zap className="h-4.5 w-4.5 text-white" />
           </div>
-          <span className="text-lg font-bold gradient-text leading-none">DeFi Recipes on Arc</span>
+          <span className="display font-semibold text-sm text-ink hidden sm:block tracking-tight">DeFi Recipes on Arc</span>
         </Link>
 
         {/* Desktop nav */}
-        <div className="hidden lg:flex items-center gap-2">
-          <nav className="flex items-center gap-1">
-            {/* Recipes link */}
-            <Link href="/" className={linkClass('/')}>Recipes</Link>
+        <nav className="hidden lg:flex items-center gap-1">
+          {/* Recipes */}
+          <Link
+            href="/"
+            className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+              pathname === '/'
+                ? 'bg-white/10 text-ink'
+                : 'text-muted hover:text-ink hover:bg-white/5'
+            }`}
+          >
+            Recipes
+          </Link>
 
-            {/* App Kit dropdown */}
-            <div className="relative" ref={kitRef}>
-              <button
-                type="button"
-                aria-haspopup="true"
-                aria-expanded={kitOpen}
-                onClick={() => setKitOpen(o => !o)}
-                className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
-                  kitActive
-                    ? 'border-blue-600 bg-blue-950/70 text-blue-200 font-semibold'
-                    : 'border-slate-700 bg-slate-900/70 text-slate-300 hover:border-blue-500 hover:text-white'
-                }`}
+          {/* App Kit dropdown */}
+          <div className="relative" ref={kitRef}>
+            <button
+              type="button"
+              onClick={() => setKitOpen(o => !o)}
+              aria-expanded={kitOpen}
+              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                kitActive
+                  ? 'bg-white/10 text-ink'
+                  : 'text-muted hover:text-ink hover:bg-white/5'
+              }`}
+            >
+              <span>App Kit</span>
+              <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${kitOpen ? 'rotate-180' : ''}`} />
+            </button>
+
+            {kitOpen && (
+              <div
+                className="absolute left-0 top-[calc(100%+8px)] w-64 overflow-hidden rounded-2xl border shadow-card-lg"
+                style={{ background: 'rgba(13,27,47,0.97)', borderColor: 'var(--border-strong)', backdropFilter: 'blur(40px)' }}
               >
-                App Kit
-                <ChevronDown className={`h-3 w-3 transition-transform ${kitOpen ? 'rotate-180' : ''}`} />
-              </button>
-
-              {kitOpen && (
-                <div className="absolute left-0 top-[calc(100%+6px)] z-50 w-56 rounded-xl border border-slate-700 bg-slate-900/95 shadow-2xl shadow-slate-950/60 overflow-hidden">
-                  <div className="px-3 pt-2.5 pb-1">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Circle App Kit</p>
-                  </div>
-                  {APP_KIT_ITEMS.map(item => {
-                    const active = pathname.startsWith(item.href);
-                    return (
-                      <Link
-                        key={item.href}
-                        href={item.href}
-                        onClick={() => setKitOpen(false)}
-                        className={`group flex items-start gap-3 px-3 py-2.5 transition ${
-                          active
-                            ? 'bg-blue-950/60 text-blue-200'
-                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                        }`}
-                      >
-                        <ArrowRight className={`mt-0.5 h-3.5 w-3.5 shrink-0 transition ${active ? 'text-blue-400' : 'text-slate-500 group-hover:text-blue-400'}`} />
-                        <div>
-                          <div className="text-xs font-semibold leading-none">{item.label}</div>
-                          <div className="mt-0.5 text-[11px] text-slate-500">{item.desc}</div>
-                        </div>
-                      </Link>
-                    );
-                  })}
-                  <div className="border-t border-slate-800 px-3 py-2">
-                    <p className="text-[10px] text-slate-600">Keyless · No backend · Browser wallet</p>
-                  </div>
+                <div className="px-3 pt-3 pb-1">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted px-1">Circle App Kit</p>
                 </div>
-              )}
-            </div>
-          </nav>
+                {APP_KIT_ITEMS.map(item => (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    onClick={() => setKitOpen(false)}
+                    className={`flex items-start gap-3 rounded-xl mx-1.5 mb-0.5 px-2.5 py-2.5 transition-colors hover:bg-white/7 ${
+                      pathname?.startsWith(item.href) ? 'bg-white/8' : ''
+                    }`}
+                  >
+                    <span className={`mt-0.5 shrink-0 ${item.accent}`}>{item.icon}</span>
+                    <span>
+                      <span className="block text-sm font-medium text-ink leading-none mb-0.5">{item.label}</span>
+                      <span className="block text-xs text-muted">{item.desc}</span>
+                    </span>
+                    {pathname?.startsWith(item.href) && (
+                      <span className="ml-auto mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                    )}
+                  </Link>
+                ))}
+                <div className="mx-3 mb-3 mt-2 rounded-xl border px-3 py-2" style={{ borderColor: 'var(--border)', background: 'var(--surface-inner)' }}>
+                  <p className="text-[10px] text-subtle">Keyless · No backend · Browser wallet</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </nav>
 
-          {/* Chain badge */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-800/80 border border-slate-700 text-xs font-mono text-emerald-400">
-            <span className={`h-2 w-2 rounded-full ${isArcChain ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-            <span>{isArcChain ? t('navArcTestnet') : t('navWrongNetwork')}</span>
+        {/* Right side controls */}
+        <div className="hidden lg:flex items-center gap-2.5">
+          {/* Chain status */}
+          <div className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-mono ${
+            isArc
+              ? 'border-success/30 bg-success/8 text-success'
+              : 'border-warning/30 bg-warning/8 text-warning'
+          }`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${isArc ? 'bg-success animate-pulse' : 'bg-warning'}`} />
+            <span>{isArc ? t('navArcTestnet') : t('navWrongNetwork')}</span>
           </div>
 
+          {/* Language */}
           <select
             value={lang}
             onChange={e => setLang(e.target.value as 'en' | 'vi')}
             aria-label={t('navLanguage')}
-            className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-200"
+            className="rounded-lg border px-2.5 py-1.5 text-xs font-semibold text-ink cursor-pointer"
+            style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}
           >
             <option value="en">EN</option>
             <option value="vi">VI</option>
@@ -151,7 +186,8 @@ export const Navbar: React.FC = () => {
             type="button"
             aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
             onClick={() => setMobileOpen(o => !o)}
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-700 bg-slate-900 text-slate-300"
+            className="flex h-9 w-9 items-center justify-center rounded-xl text-muted hover:text-ink transition-colors"
+            style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
           >
             {mobileOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
           </button>
@@ -160,70 +196,63 @@ export const Navbar: React.FC = () => {
 
       {/* Mobile panel */}
       {mobileOpen && (
-        <div className="lg:hidden border-t border-slate-800 bg-slate-950/98 px-4 py-3 space-y-1">
-          {/* Recipes */}
+        <div className="lg:hidden border-t px-4 py-3 space-y-0.5" style={{ background: 'rgba(13,27,47,0.97)', borderColor: 'var(--border)' }}>
           <Link
             href="/"
-            onClick={() => setMobileOpen(false)}
-            className={`block w-full rounded-lg px-3 py-2 text-sm font-medium transition ${
-              pathname === '/'
-                ? 'bg-blue-950/70 border border-blue-700 text-blue-200'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+            className={`block rounded-xl px-3.5 py-2.5 text-sm font-medium transition-colors ${
+              pathname === '/' ? 'bg-white/10 text-ink' : 'text-muted hover:text-ink hover:bg-white/5'
             }`}
           >
             Recipes
           </Link>
 
-          {/* App Kit group */}
-          <div className="rounded-lg border border-slate-800 bg-slate-900/60 overflow-hidden">
+          {/* App Kit collapsible */}
+          <div>
             <button
               type="button"
-              onClick={() => setMobileKitOpen(o => !o)}
-              className={`flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium transition ${
-                kitActive ? 'text-blue-200' : 'text-slate-300'
+              onClick={() => setKitMobOpen(o => !o)}
+              className={`flex w-full items-center justify-between rounded-xl px-3.5 py-2.5 text-sm font-medium transition-colors ${
+                kitActive ? 'bg-white/10 text-ink' : 'text-muted hover:text-ink hover:bg-white/5'
               }`}
             >
-              <span className="flex items-center gap-2">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400">App Kit</span>
-              </span>
-              <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${mobileKitOpen ? 'rotate-180' : ''}`} />
+              <span>App Kit</span>
+              <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${kitMobOpen ? 'rotate-180' : ''}`} />
             </button>
-            {mobileKitOpen && (
-              <div className="border-t border-slate-800 divide-y divide-slate-800/60">
-                {APP_KIT_ITEMS.map(item => {
-                  const active = pathname.startsWith(item.href);
-                  return (
-                    <Link
-                      key={item.href}
-                      href={item.href}
-                      onClick={() => { setMobileOpen(false); setMobileKitOpen(false); }}
-                      className={`flex items-center gap-3 px-4 py-2.5 text-sm transition ${
-                        active ? 'bg-blue-950/50 text-blue-200' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                      }`}
-                    >
-                      <ArrowRight className={`h-3.5 w-3.5 shrink-0 ${active ? 'text-blue-400' : 'text-slate-600'}`} />
-                      <div>
-                        <div className="font-medium leading-none">{item.label}</div>
-                        <div className="mt-0.5 text-[11px] text-slate-500">{item.desc}</div>
-                      </div>
-                    </Link>
-                  );
-                })}
+            {kitMobOpen && (
+              <div className="mt-0.5 ml-3 space-y-0.5 border-l pl-3" style={{ borderColor: 'var(--border)' }}>
+                {APP_KIT_ITEMS.map(item => (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
+                      pathname?.startsWith(item.href)
+                        ? 'bg-white/8 text-ink'
+                        : 'text-muted hover:text-ink hover:bg-white/5'
+                    }`}
+                  >
+                    <span className={`shrink-0 ${item.accent}`}>{item.icon}</span>
+                    <span>
+                      <span className="block font-medium leading-tight">{item.label}</span>
+                      <span className="block text-[11px] text-subtle">{item.desc}</span>
+                    </span>
+                  </Link>
+                ))}
               </div>
             )}
           </div>
 
-          {/* Bottom controls */}
-          <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-            <div className="flex items-center gap-1.5 text-xs font-mono text-emerald-400">
-              <span className={`h-2 w-2 rounded-full ${isArcChain ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-              <span>{isArcChain ? t('navArcTestnet') : t('navWrongNetwork')}</span>
+          {/* Footer row */}
+          <div className="flex items-center justify-between pt-2.5 mt-1.5 border-t" style={{ borderColor: 'var(--border)' }}>
+            <div className={`flex items-center gap-1.5 text-xs font-mono ${isArc ? 'text-success' : 'text-warning'}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${isArc ? 'bg-success animate-pulse' : 'bg-warning'}`} />
+              {isArc ? t('navArcTestnet') : t('navWrongNetwork')}
             </div>
             <select
               value={lang}
               onChange={e => setLang(e.target.value as 'en' | 'vi')}
               aria-label={t('navLanguage')}
-              className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-200"
+              className="rounded-lg border px-2 py-1 text-xs font-semibold text-ink"
+              style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}
             >
               <option value="en">EN</option>
               <option value="vi">VI</option>

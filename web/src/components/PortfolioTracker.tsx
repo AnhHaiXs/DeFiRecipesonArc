@@ -408,45 +408,47 @@ const PortfolioTrackerContent: React.FC = () => {
       </div>
 
       {/* Portfolio Header Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="glass-card p-5">
-          <div className="flex items-center justify-between text-slate-400 text-xs font-mono uppercase">
-            <span>{t('balance')}</span>
-            <Wallet className="h-4 w-4 text-blue-400" />
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.10em] text-muted">{t('balance')}</span>
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg" style={{ background: 'rgba(172,198,233,0.10)' }}>
+              <Wallet className="h-3.5 w-3.5" style={{ color: 'var(--accent)' }} />
+            </div>
           </div>
-          <div className="text-3xl font-extrabold text-white font-mono mt-2">
-            ${totalUsdcBalanceDisplay.whole}.<span className="text-slate-400 text-xl">{totalUsdcBalanceDisplay.fraction}</span>
+          <div className="display text-3xl font-bold tabular-nums text-ink">
+            ${totalUsdcBalanceDisplay.whole}<span className="text-xl text-muted">.{totalUsdcBalanceDisplay.fraction}</span>
           </div>
-          <div className="text-xs text-emerald-400 mt-1 flex items-center space-x-1">
+          <div className="mt-2 flex items-center gap-1 text-xs" style={{ color: 'var(--success)' }}>
             <ArrowUpRight className="h-3.5 w-3.5" />
             <span>{isLoadingUsdcBalance ? t('refreshingBalance') : address ? t('liveBalance') : t('connectWalletBalance')}</span>
           </div>
         </div>
 
         <div className="glass-card p-5">
-          <div className="flex items-center justify-between text-slate-400 text-xs font-mono uppercase">
-            <span>{t('activeRecipes')}</span>
-            <Clock className="h-4 w-4 text-emerald-400" />
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.10em] text-muted">{t('activeRecipes')}</span>
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg" style={{ background: 'rgba(111,207,151,0.10)' }}>
+              <Clock className="h-3.5 w-3.5" style={{ color: 'var(--success)' }} />
+            </div>
           </div>
-          <div className="text-3xl font-extrabold text-white font-mono mt-2">
-            {activeRecipeCount} <span className="text-xs font-sans font-normal text-slate-400">{t('recipesRunning')}</span>
+          <div className="display text-3xl font-bold tabular-nums text-ink">
+            {activeRecipeCount} <span className="text-sm font-normal text-muted">{t('recipesRunning')}</span>
           </div>
-          <div className="text-xs text-slate-400 mt-1">
-            {t('scopedAuthorization')}
-          </div>
+          <div className="mt-2 text-xs text-muted">{t('scopedAuthorization')}</div>
         </div>
 
         <div className="glass-card p-5">
-          <div className="flex items-center justify-between text-slate-400 text-xs font-mono uppercase">
-            <span>{t('cumulativeGas')}</span>
-            <CheckCircle className="h-4 w-4 text-purple-400" />
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.10em] text-muted">{t('cumulativeGas')}</span>
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg" style={{ background: 'rgba(172,198,233,0.08)' }}>
+              <CheckCircle className="h-3.5 w-3.5" style={{ color: 'var(--accent)' }} />
+            </div>
           </div>
-          <div className="text-3xl font-extrabold text-white font-mono mt-2">
-            ${totalGasUsedDisplay.whole}.<span className="text-slate-400 text-xl">{totalGasUsedDisplay.fraction}</span>
+          <div className="display text-3xl font-bold tabular-nums text-ink">
+            ${totalGasUsedDisplay.whole}<span className="text-xl text-muted">.{totalGasUsedDisplay.fraction}</span>
           </div>
-          <div className="text-xs text-purple-300 mt-1">
-            {t('gasSummary')}
-          </div>
+          <div className="mt-2 text-xs text-muted">{t('gasSummary')}</div>
         </div>
       </div>
 
