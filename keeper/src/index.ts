@@ -46,10 +46,28 @@ function getErrorMessage(error: unknown): string {
   return 'Unknown error';
 }
 
+const MAX_REQUEST_BODY_BYTES = 256 * 1024; // 256 KB hard cap — prevents OOM via large payloads
+
+class RequestPayloadTooLargeError extends Error {
+  constructor() {
+    super(`Request body exceeds maximum allowed size of ${MAX_REQUEST_BODY_BYTES} bytes.`);
+    this.name = 'RequestPayloadTooLargeError';
+  }
+}
+
 async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buf.byteLength;
+    if (totalBytes > MAX_REQUEST_BODY_BYTES) {
+      // Drain remaining stream so the keep-alive connection can be reused.
+      req.resume();
+      throw new RequestPayloadTooLargeError();
+    }
+    chunks.push(buf);
   }
 
   const rawBody = Buffer.concat(chunks).toString('utf8').trim();
@@ -171,6 +189,11 @@ function applyCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): 
 function setCommonResponseHeaders(res: http.ServerResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // Security headers for a JSON API server (not a browser-rendered page).
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cache-Control', 'no-store');
 }
 
 function authorizeRequest(req: http.IncomingMessage, pathName: string, res: http.ServerResponse): boolean {
@@ -206,6 +229,21 @@ type RateLimitState = {
 };
 
 const rateLimitByIp = new Map<string, RateLimitState>();
+
+// Periodically evict stale rate-limit entries to prevent unbounded Map growth.
+// Entries older than 2× the rate-limit window are safe to remove.
+function evictStaleRateLimitEntries(): void {
+  const now = Date.now();
+  const windowMs = RUNTIME_CONFIG.keeperApiRateLimitWindowMs;
+  for (const [key, state] of rateLimitByIp) {
+    if (now - state.windowStartedAtMs >= windowMs * 2) {
+      rateLimitByIp.delete(key);
+    }
+  }
+}
+
+// Run eviction every 5 minutes. unref() ensures this timer does not prevent process exit.
+setInterval(evictStaleRateLimitEntries, 5 * 60 * 1000).unref();
 
 function enforceRateLimit(req: http.IncomingMessage, pathName: string, res: http.ServerResponse): boolean {
   if (!isProtectedPath(pathName)) {
@@ -255,7 +293,10 @@ export function createHealthServer(port: number) {
     }
 
     if (method === 'OPTIONS') {
-      setJsonResponse(res, 204, {});
+      // 204 No Content: RFC 7231 allows but does not require a body. Sending none is
+      // correct and avoids confusion with JSON Content-Type on a no-content response.
+      res.statusCode = 204;
+      res.end();
       return;
     }
 
@@ -277,7 +318,8 @@ export function createHealthServer(port: number) {
         const payload = await registerOrActivateRecipe(body);
         setJsonResponse(res, 200, payload);
       } catch (error: unknown) {
-        setJsonResponse(res, 400, {
+        const statusCode = error instanceof RequestPayloadTooLargeError ? 413 : 400;
+        setJsonResponse(res, statusCode, {
           success: false,
           error: getErrorMessage(error),
         });
@@ -291,7 +333,8 @@ export function createHealthServer(port: number) {
         const payload = await updateRecipeStatus(body);
         setJsonResponse(res, 200, payload);
       } catch (error: unknown) {
-        setJsonResponse(res, 400, {
+        const statusCode = error instanceof RequestPayloadTooLargeError ? 413 : 400;
+        setJsonResponse(res, statusCode, {
           success: false,
           error: getErrorMessage(error),
         });
@@ -305,7 +348,8 @@ export function createHealthServer(port: number) {
         const payload = await precheckDcaAllowance(body);
         setJsonResponse(res, 200, payload);
       } catch (error: unknown) {
-        setJsonResponse(res, 400, {
+        const statusCode = error instanceof RequestPayloadTooLargeError ? 413 : 400;
+        setJsonResponse(res, statusCode, {
           success: false,
           error: getErrorMessage(error),
         });
@@ -453,34 +497,47 @@ export async function startKeeperEngine() {
   // Start Cron Poll Scheduler
   startCronScheduler(30_000);
 
-  // Setup process exit handlers for graceful shutdown
-  process.on('SIGINT', async () => {
-    console.log('\n[Keeper Engine] Shutting down gracefully...');
+  // Shared graceful shutdown — called by both SIGINT and SIGTERM handlers.
+  let shuttingDown = false;
+  async function gracefulShutdown(signal: string): Promise<void> {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    console.log(`\n[Keeper Engine] Received ${signal}. Shutting down gracefully...`);
     stopCronScheduler();
-    await recipeWorker.close();
-    await txConfirmationWorker.close();
-    await recipeQueue.close();
-    await txConfirmationQueue.close();
+    try {
+      await recipeWorker.close();
+    } catch (err) {
+      console.warn('[Keeper Engine] recipeWorker.close() error:', getErrorMessage(err));
+    }
+    try {
+      await txConfirmationWorker.close();
+    } catch (err) {
+      console.warn('[Keeper Engine] txConfirmationWorker.close() error:', getErrorMessage(err));
+    }
+    try {
+      await recipeQueue.close();
+    } catch (err) {
+      console.warn('[Keeper Engine] recipeQueue.close() error:', getErrorMessage(err));
+    }
+    try {
+      await txConfirmationQueue.close();
+    } catch (err) {
+      console.warn('[Keeper Engine] txConfirmationQueue.close() error:', getErrorMessage(err));
+    }
     await new Promise<void>((resolve) => {
       healthServer.close(() => resolve());
     });
-    await disconnectDb();
+    await disconnectDb().catch((err) => {
+      console.warn('[Keeper Engine] disconnectDb() error:', getErrorMessage(err));
+    });
     process.exit(0);
-  });
+  }
 
-  process.on('SIGTERM', async () => {
-    console.log('\n[Keeper Engine] Received SIGTERM. Shutting down...');
-    stopCronScheduler();
-    await recipeWorker.close();
-    await txConfirmationWorker.close();
-    await recipeQueue.close();
-    await txConfirmationQueue.close();
-    await new Promise<void>((resolve) => {
-      healthServer.close(() => resolve());
-    });
-    await disconnectDb();
-    process.exit(0);
-  });
+  // Setup process exit handlers for graceful shutdown
+  process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
 
   process.on('unhandledRejection', (reason, promise) => {
     console.error('[Keeper Engine] Unhandled Rejection at:', promise, 'reason:', reason);

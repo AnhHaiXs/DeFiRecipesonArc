@@ -1,5 +1,5 @@
 import { JsonObject, RecipeStatus, RecipeType } from '../db/types';
-import { createPublicClient, decodeFunctionData, http } from 'viem';
+import { createPublicClient, http } from 'viem';
 import { arcTestnet } from 'viem/chains';
 import {
   dispatchRecipeExecutionJob,
@@ -28,6 +28,19 @@ import {
   remainingBudgetBaseUnits,
   toPersistedDcaParameters,
 } from '../domain/dcaConfig';
+import {
+  DCA_SWAP_SELECTOR,
+  DCA_ALWAYS_STRICT_SPENDERS,
+  DCA_SWAP_ABI,
+  extractSelectorFromCallData,
+  extractAddressWordFromCalldata,
+  getDcaDecodedSpenderCandidates,
+  normalizeDcaSpenderCandidates,
+  resolveDcaAllowanceSpenderAddress,
+  getDcaAllowanceSpenderCandidates,
+  getDcaAlwaysStrictDecodedSpenders,
+  getDcaStrictRequiredSpenders,
+} from '../domain/dcaCalldata';
 const AUTO_COMPOUNDER_LENDING_BORROWING_ADDRESS = CONTRACT_ADDRESSES.autoCompounderLendingBorrowing;
 import { getKeeperAccount, getKeeperWalletClient } from '../index';
 import { createDcaSwapRouteClientFromRuntime } from '../integrations/circle/dcaSwapRouteClient';
@@ -115,25 +128,8 @@ const RECIPE_SELECTOR_LABEL: Partial<Record<RecipeType, string>> = {
   RECURRING_DCA: 'swapExactTokensForTokens(uint256,uint256,address[],address,uint256)',
 };
 
-const DCA_SWAP_SELECTOR = '0x7ebc46f0';
-const DCA_ALWAYS_STRICT_SPENDERS = new Set<string>([
-  '0x00000000000000000000000000000000000000c0',
-]);
-const DCA_SWAP_ABI = [
-  {
-    type: 'function',
-    name: 'swapExactTokensForTokens',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'amountIn', type: 'uint256' },
-      { name: 'amountOutMin', type: 'uint256' },
-      { name: 'path', type: 'address[]' },
-      { name: 'to', type: 'address' },
-      { name: 'deadline', type: 'uint256' },
-    ],
-    outputs: [{ name: '', type: 'uint256[]' }],
-  },
-] as const;
+// DCA_SWAP_SELECTOR, DCA_ALWAYS_STRICT_SPENDERS, DCA_SWAP_ABI and all DCA calldata
+// utility functions are imported from '../domain/dcaCalldata' (shared module).
 
 interface RecipeParameters {
   checkIntervalHours?: unknown;
@@ -443,68 +439,6 @@ function isDcaNoRouteError(errorMessage: string): boolean {
   );
 }
 
-function extractSelectorFromCallData(callData: `0x${string}`): `0x${string}` {
-  if (callData.length < 10) {
-    return '0x';
-  }
-  return callData.slice(0, 10) as `0x${string}`;
-}
-
-function extractAddressWordFromCalldata(callData: `0x${string}`, wordIndex: number): `0x${string}` | null {
-  const data = callData.slice(2);
-  const start = 8 + wordIndex * 64;
-  const end = start + 64;
-  if (data.length < end) {
-    return null;
-  }
-
-  const word = data.slice(start, end);
-  const addressHex = `0x${word.slice(24)}`;
-  if (!/^0x[a-fA-F0-9]{40}$/.test(addressHex)) {
-    return null;
-  }
-
-  return addressHex.toLowerCase() as `0x${string}`;
-}
-
-function getDcaDecodedSpenderCandidates(callData: `0x${string}`): `0x${string}`[] {
-  const fallbackCandidates = [
-    extractAddressWordFromCalldata(callData, 1),
-    extractAddressWordFromCalldata(callData, 3),
-  ].filter((value): value is `0x${string}` => value !== null && value.toLowerCase() !== '0x0000000000000000000000000000000000000000');
-
-  try {
-    const decoded = decodeFunctionData({
-      abi: DCA_SWAP_ABI,
-      data: callData,
-    });
-
-    if (decoded.functionName !== 'swapExactTokensForTokens') {
-      return Array.from(new Set(fallbackCandidates.map((candidate) => candidate.toLowerCase()))) as `0x${string}`[];
-    }
-
-    const [, , path, to] = decoded.args as [bigint, bigint, readonly `0x${string}`[], `0x${string}`, bigint];
-    const abiCandidates = [to, ...(Array.isArray(path) ? path : [])].filter(
-      (value): value is `0x${string}` => Boolean(value) && /^0x[a-fA-F0-9]{40}$/.test(value) && value.toLowerCase() !== '0x0000000000000000000000000000000000000000'
-    );
-
-    const merged = Array.from(new Set([...abiCandidates, ...fallbackCandidates]));
-    return merged.map((candidate) => candidate.toLowerCase()) as `0x${string}`[];
-  } catch {
-    return Array.from(new Set(fallbackCandidates.map((candidate) => candidate.toLowerCase()))) as `0x${string}`[];
-  }
-}
-
-function normalizeDcaSpenderCandidates(candidates: `0x${string}`[]): `0x${string}`[] {
-  return Array.from(
-    new Set(
-      candidates
-        .filter((candidate) => candidate.toLowerCase() !== '0x0000000000000000000000000000000000000000')
-        .map((candidate) => candidate.toLowerCase())
-    )
-  ) as `0x${string}`[];
-}
-
 function extractRevertedContractAddressFromSimulationError(errorMessage: string): `0x${string}` | null {
   const match = errorMessage.match(/contract call:\s*address:\s*(0x[a-fA-F0-9]{40})/i);
   if (!match) {
@@ -514,73 +448,9 @@ function extractRevertedContractAddressFromSimulationError(errorMessage: string)
   return match[1].toLowerCase() as `0x${string}`;
 }
 
-function resolveDcaAllowanceSpenderAddress(
-  callData: `0x${string}`,
-  targetProtocol: `0x${string}`,
-  routeSpenderAddress: `0x${string}` | null
-): `0x${string}` {
-  if (routeSpenderAddress) {
-    return routeSpenderAddress;
-  }
-
-  // Some route providers omit allowanceTarget/spender in response payload.
-  // For the known DCA selector shape, try the calldata-derived spender addresses in order.
-  if (extractSelectorFromCallData(callData).toLowerCase() === DCA_SWAP_SELECTOR) {
-    const decodedSpenders = getDcaDecodedSpenderCandidates(callData);
-    if (decodedSpenders.length > 0) {
-      return decodedSpenders[0] as `0x${string}`;
-    }
-  }
-
-  if (targetProtocol && targetProtocol !== ARC_APP_KIT_DCA_USDC_SPENDER) {
-    return targetProtocol;
-  }
-
-  return ARC_APP_KIT_DCA_USDC_SPENDER;
-}
-
-function getDcaAllowanceSpenderCandidates(
-  callData: `0x${string}`,
-  targetProtocol: `0x${string}`,
-  routeSpenderAddress: `0x${string}` | null
-): `0x${string}`[] {
-  const runtimeSpender = resolveDcaAllowanceSpenderAddress(callData, targetProtocol, routeSpenderAddress);
-  const decodedSpenders = getDcaDecodedSpenderCandidates(callData);
-  return normalizeDcaSpenderCandidates(
-    [runtimeSpender, ...decodedSpenders, targetProtocol, CONTRACT_ADDRESSES.sharedExecutorProxy]
-  ).sort() as `0x${string}`[];
-}
-
-function getDcaAlwaysStrictDecodedSpenders(
-  callData: `0x${string}`,
-  userAddress: `0x${string}`
-): `0x${string}`[] {
-  const normalizedUserAddress = userAddress.toLowerCase();
-  return getDcaDecodedSpenderCandidates(callData).filter((candidate) => {
-    const normalized = candidate.toLowerCase();
-    return normalized !== normalizedUserAddress && DCA_ALWAYS_STRICT_SPENDERS.has(normalized);
-  });
-}
-
-function getDcaStrictRequiredSpenders(
-  callData: `0x${string}`,
-  targetProtocol: `0x${string}`,
-  routeSpenderAddress: `0x${string}` | null,
-  userAddress: `0x${string}`
-): `0x${string}`[] {
-  const selector = extractSelectorFromCallData(callData).toLowerCase();
-  const strictDecodedSpenders = getDcaAlwaysStrictDecodedSpenders(callData, userAddress);
-  if (selector === DCA_SWAP_SELECTOR || selector === ARC_SWAP_ADAPTER_EXECUTE_SELECTOR) {
-    // Both shapes are executed through SharedExecutorProxy, which pulls USDC from the user first.
-    return normalizeDcaSpenderCandidates([
-      CONTRACT_ADDRESSES.sharedExecutorProxy as `0x${string}`,
-      ...strictDecodedSpenders,
-    ]);
-  }
-
-  const runtimeSpender = resolveDcaAllowanceSpenderAddress(callData, targetProtocol, routeSpenderAddress);
-  return normalizeDcaSpenderCandidates([runtimeSpender, ...strictDecodedSpenders]);
-}
+// resolveDcaAllowanceSpenderAddress, getDcaAllowanceSpenderCandidates,
+// getDcaAlwaysStrictDecodedSpenders, and getDcaStrictRequiredSpenders are
+// imported from '../domain/dcaCalldata' (shared module).
 
 function maybeLogSelectorNotAllowedHint(
   targetProtocol: `0x${string}`,
@@ -1601,6 +1471,7 @@ export function __resetCronSchedulerStateForTests() {
   selectorNotAllowedHintsLogged.clear();
   protocolAllowedCache.clear();
   protocolNotAllowedHintsLogged.clear();
+  appKitBypassHintsLogged.clear();
   executorNotApprovedHintsLogged.clear();
   userExecutionPausedHintsLogged.clear();
   allowanceExceededHintsLogged.clear();

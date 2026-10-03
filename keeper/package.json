@@ -31,6 +31,18 @@
     "@types/pg": "^8.20.3",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.4.5",
-    "vitest": "3.2.6"
+    "vitest": "^4.1.11"
+  },
+  "pnpm": {
+    "overrides": {
+      "brace-expansion@1": ">=1.1.21",
+      "brace-expansion@2": ">=2.0.2",
+      "brace-expansion": ">=5.0.12",
+      "nanoid": ">=3.3.18",
+      "vite": ">=6.4.3",
+      "toml": ">=4.2.0",
+      "stream-json": ">=3.5.0",
+      "uuid": ">=11.1.1"
+    }
   }
 }

@@ -717,10 +717,26 @@ export const txConfirmationWorker = redisConnection
   )
   : (noopWorker as unknown as Worker<TxConfirmationJobData>);
 
-recipeWorker.on('error', () => {
-  // Silence worker loop connection warnings to keep console clean
+function isBullMqConnectionNoise(err: Error): boolean {
+  const msg = err.message.toLowerCase();
+  return (
+    msg.length === 0 ||
+    msg.includes('connection') ||
+    msg.includes('econnreset') ||
+    msg.includes('socket') ||
+    msg.includes('retrying')
+  );
+}
+
+recipeWorker.on('error', (err) => {
+  // Suppress transient Redis reconnect noise; surface genuine worker failures.
+  if (!isBullMqConnectionNoise(err)) {
+    console.error('[BullMQ Worker Error] recipeWorker:', err.message);
+  }
 });
 
-txConfirmationWorker.on('error', () => {
-  // Silence worker loop connection warnings to keep console clean
+txConfirmationWorker.on('error', (err) => {
+  if (!isBullMqConnectionNoise(err)) {
+    console.error('[BullMQ Worker Error] txConfirmationWorker:', err.message);
+  }
 });

@@ -1,11 +1,9 @@
 import { recipesRepository } from '../db/repositories/recipesRepository';
 import { executionLogsRepository } from '../db/repositories/executionLogsRepository';
 import { JsonObject, RecipeStatus, RecipeType, SwapProvider } from '../db/types';
-import { decodeFunctionData, formatUnits, type Address, type Hash } from 'viem';
+import { formatUnits, type Address, type Hash } from 'viem';
 import { publicClient } from '../simulation/staticSimulationEngine';
 import {
-  ARC_APP_KIT_DCA_USDC_SPENDER,
-  ARC_SWAP_ADAPTER_EXECUTE_SELECTOR,
   ARC_USDC_ADDRESS,
   DEFAULT_DCA_TARGET_ASSET_SYMBOL,
   parseDcaMaxSlippageBpsStrict,
@@ -20,6 +18,19 @@ import {
   parseDcaConfigStateStrict,
   toPersistedDcaParameters,
 } from '../domain/dcaConfig';
+import {
+  DCA_SWAP_SELECTOR,
+  DCA_ALWAYS_STRICT_SPENDERS,
+  DCA_SWAP_ABI,
+  extractSelectorFromCallData,
+  extractAddressWordFromCalldata,
+  getDcaDecodedSpenderCandidates,
+  normalizeDcaSpenderCandidates,
+  resolveDcaAllowanceSpenderAddress,
+  getDcaAllowanceSpenderCandidates,
+  getDcaAlwaysStrictDecodedSpenders,
+  getDcaStrictRequiredSpenders,
+} from '../domain/dcaCalldata';
 import { createDcaSwapRouteClientFromRuntime } from '../integrations/circle/dcaSwapRouteClient';
 
 const ADDRESS_REGEX = /^0x[a-fA-F0-9]{40}$/;
@@ -76,25 +87,8 @@ const ERC20_ALLOWANCE_ABI = [
   },
 ] as const;
 
-const DCA_SWAP_SELECTOR = '0x7ebc46f0';
-const DCA_ALWAYS_STRICT_SPENDERS = new Set<string>([
-  '0x00000000000000000000000000000000000000c0',
-]);
-const DCA_SWAP_ABI = [
-  {
-    type: 'function',
-    name: 'swapExactTokensForTokens',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'amountIn', type: 'uint256' },
-      { name: 'amountOutMin', type: 'uint256' },
-      { name: 'path', type: 'address[]' },
-      { name: 'to', type: 'address' },
-      { name: 'deadline', type: 'uint256' },
-    ],
-    outputs: [{ name: '', type: 'uint256[]' }],
-  },
-] as const;
+// DCA_SWAP_SELECTOR, DCA_ALWAYS_STRICT_SPENDERS, DCA_SWAP_ABI and DCA calldata
+// utility functions are imported from '../domain/dcaCalldata' (shared module).
 const dcaSwapRouteClient = createDcaSwapRouteClientFromRuntime();
 
 function recipeLogContext(params: { userAddress: string; recipeType: RecipeType; recipeId?: string }): string {
@@ -528,6 +522,7 @@ function parseListExecutionLogsPayload(rawQuery: unknown): {
 
 function toRelativeTime(timestamp: Date): string {
   const diffMs = Date.now() - timestamp.getTime();
+  // Guard against clock skew: negative diff (future timestamp) is treated as "just now".
   if (diffMs < 60_000) {
     return 'just now';
   }
@@ -546,29 +541,59 @@ function toRelativeTime(timestamp: Date): string {
   return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
-async function resolveGasUsedUsdc(log: {
-  gasUsedUsdc: string | null;
-  txHash: string | null;
-}): Promise<string | null> {
-  if (!log.gasUsedUsdc) {
-    return null;
+// Maximum on-chain receipt fetches per listExecutionLogs call.
+// Each fetch is an RPC round-trip; cap prevents N+1 RPC bursts on large pages.
+const MAX_RECEIPT_FETCHES_PER_PAGE = 5;
+
+type GasLogEntry = { gasUsedUsdc: string | null; txHash: string | null };
+
+/**
+ * Resolve stored gas values for a batch of logs.
+ * - Entries with a stored value that is already sane (< 1 000 USDC) are returned directly.
+ * - Entries that appear inflated are re-fetched from on-chain receipts, capped at
+ *   MAX_RECEIPT_FETCHES_PER_PAGE to avoid N+1 RPC bursts when paging over many logs.
+ */
+async function resolveGasUsedUsdcBatch(logs: GasLogEntry[]): Promise<(string | null)[]> {
+  // Pass 1 — cheap synchronous resolution: detect which entries still need RPC.
+  const results: (string | null | undefined)[] = logs.map((log) => {
+    if (!log.gasUsedUsdc) return null;
+    const reported = Number(log.gasUsedUsdc);
+    if (Number.isFinite(reported) && reported < 1_000) return log.gasUsedUsdc;
+    return undefined; // sentinel: needs RPC receipt
+  });
+
+  // Pass 2 — capped RPC fetches for inflated values.
+  let fetchBudget = MAX_RECEIPT_FETCHES_PER_PAGE;
+  const fetches: Promise<void>[] = [];
+
+  for (let i = 0; i < logs.length; i++) {
+    if (results[i] !== undefined) continue;
+    const log = logs[i];
+    if (!log.txHash || !/^0x[a-fA-F0-9]{64}$/.test(log.txHash)) {
+      results[i] = null;
+      continue;
+    }
+    if (fetchBudget <= 0) {
+      results[i] = null;
+      continue;
+    }
+    fetchBudget -= 1;
+    const idx = i;
+    const hash = log.txHash as Hash;
+    fetches.push(
+      publicClient
+        .getTransactionReceipt({ hash })
+        .then((receipt) => {
+          results[idx] = formatUnits(receipt.gasUsed * receipt.effectiveGasPrice, 18);
+        })
+        .catch(() => {
+          results[idx] = null;
+        })
+    );
   }
 
-  const reportedGas = Number(log.gasUsedUsdc);
-  if (Number.isFinite(reportedGas) && reportedGas < 1_000) {
-    return log.gasUsedUsdc;
-  }
-
-  if (!log.txHash || !/^0x[a-fA-F0-9]{64}$/.test(log.txHash)) {
-    return null;
-  }
-
-  try {
-    const receipt = await publicClient.getTransactionReceipt({ hash: log.txHash as Hash });
-    return formatUnits(receipt.gasUsed * receipt.effectiveGasPrice, 18);
-  } catch {
-    return null;
-  }
+  await Promise.all(fetches);
+  return results.map((v) => (v === undefined ? null : v));
 }
 
 export async function listExecutionLogs(
@@ -588,9 +613,10 @@ export async function listExecutionLogs(
     offset: payload.offset,
   });
 
-  const formattedLogs = await Promise.all(logs.map(async (log) => {
+  const gasValues = await resolveGasUsedUsdcBatch(logs);
+  const formattedLogs = logs.map((log, i) => {
     const eventTimestamp = log.executedAt || log.simulatedAt;
-    const gasUsedUsdc = await resolveGasUsedUsdc(log);
+    const gasUsedUsdc = gasValues[i];
     return {
       id: log.id,
       recipeId: log.activeRecipeId,
@@ -603,7 +629,7 @@ export async function listExecutionLogs(
       gasUsedUsdc: gasUsedUsdc ? `${gasUsedUsdc} USDC` : null,
       errorMessage: log.errorMessage,
     };
-  }));
+  });
 
   const page = Math.max(1, Math.floor(payload.offset / payload.limit) + 1);
   const hasMore = payload.offset + formattedLogs.length < total;
@@ -748,136 +774,10 @@ function parseUsdcAmountToBaseUnits(value: unknown, fieldName: string): bigint {
   return amountBaseUnits;
 }
 
-function extractSelectorFromCallData(callData: `0x${string}`): `0x${string}` {
-  if (callData.length < 10) {
-    return '0x';
-  }
-  return callData.slice(0, 10) as `0x${string}`;
-}
-
-function extractAddressWordFromCalldata(callData: `0x${string}`, wordIndex: number): `0x${string}` | null {
-  const data = callData.slice(2);
-  const start = 8 + wordIndex * 64;
-  const end = start + 64;
-  if (data.length < end) {
-    return null;
-  }
-
-  const word = data.slice(start, end);
-  const addressHex = `0x${word.slice(24)}`;
-  if (!/^0x[a-fA-F0-9]{40}$/.test(addressHex)) {
-    return null;
-  }
-
-  return addressHex.toLowerCase() as `0x${string}`;
-}
-
-function getDcaDecodedSpenderCandidates(callData: `0x${string}`): `0x${string}`[] {
-  const fallbackCandidates = [
-    extractAddressWordFromCalldata(callData, 1),
-    extractAddressWordFromCalldata(callData, 3),
-  ].filter(
-    (value): value is `0x${string}` =>
-      value !== null && value.toLowerCase() !== '0x0000000000000000000000000000000000000000'
-  );
-
-  try {
-    const decoded = decodeFunctionData({
-      abi: DCA_SWAP_ABI,
-      data: callData,
-    });
-
-    if (decoded.functionName !== 'swapExactTokensForTokens') {
-      return Array.from(new Set(fallbackCandidates.map((candidate) => candidate.toLowerCase()))) as `0x${string}`[];
-    }
-
-    const [, , path, to] = decoded.args as [bigint, bigint, readonly `0x${string}`[], `0x${string}`, bigint];
-    const abiCandidates = [to, ...(Array.isArray(path) ? path : [])].filter(
-      (value): value is `0x${string}` => Boolean(value) && /^0x[a-fA-F0-9]{40}$/.test(value) && value.toLowerCase() !== '0x0000000000000000000000000000000000000000'
-    );
-
-    const merged = Array.from(new Set([...abiCandidates, ...fallbackCandidates]));
-    return merged.map((candidate) => candidate.toLowerCase()) as `0x${string}`[];
-  } catch {
-    return Array.from(new Set(fallbackCandidates.map((candidate) => candidate.toLowerCase()))) as `0x${string}`[];
-  }
-}
-
-function normalizeDcaSpenderCandidates(candidates: `0x${string}`[]): `0x${string}`[] {
-  return Array.from(
-    new Set(
-      candidates
-        .filter((candidate) => candidate.toLowerCase() !== '0x0000000000000000000000000000000000000000')
-        .map((candidate) => candidate.toLowerCase())
-    )
-  ) as `0x${string}`[];
-}
-
-function resolveDcaAllowanceSpenderAddress(
-  callData: `0x${string}`,
-  targetProtocol: `0x${string}`,
-  routeSpenderAddress: `0x${string}` | undefined
-): `0x${string}` {
-  if (routeSpenderAddress) {
-    return routeSpenderAddress;
-  }
-
-  if (extractSelectorFromCallData(callData).toLowerCase() === DCA_SWAP_SELECTOR) {
-    const decodedSpenders = getDcaDecodedSpenderCandidates(callData);
-    if (decodedSpenders.length > 0) {
-      return decodedSpenders[0] as `0x${string}`;
-    }
-  }
-
-  if (targetProtocol !== ARC_APP_KIT_DCA_USDC_SPENDER) {
-    return targetProtocol;
-  }
-
-  return ARC_APP_KIT_DCA_USDC_SPENDER;
-}
-
-function getDcaAllowanceSpenderCandidates(
-  callData: `0x${string}`,
-  targetProtocol: `0x${string}`,
-  routeSpenderAddress: `0x${string}` | undefined
-): `0x${string}`[] {
-  const runtimeSpender = resolveDcaAllowanceSpenderAddress(callData, targetProtocol, routeSpenderAddress);
-  const decodedSpenders = getDcaDecodedSpenderCandidates(callData);
-  return normalizeDcaSpenderCandidates(
-    [runtimeSpender, ...decodedSpenders, targetProtocol, CONTRACT_ADDRESSES.sharedExecutorProxy]
-  ).sort() as `0x${string}`[];
-}
-
-function getDcaAlwaysStrictDecodedSpenders(
-  callData: `0x${string}`,
-  userAddress: `0x${string}`
-): `0x${string}`[] {
-  const normalizedUserAddress = userAddress.toLowerCase();
-  return getDcaDecodedSpenderCandidates(callData).filter((candidate) => {
-    const normalized = candidate.toLowerCase();
-    return normalized !== normalizedUserAddress && DCA_ALWAYS_STRICT_SPENDERS.has(normalized);
-  });
-}
-
-function getDcaStrictRequiredSpenders(
-  callData: `0x${string}`,
-  targetProtocol: `0x${string}`,
-  routeSpenderAddress: `0x${string}` | undefined,
-  userAddress: `0x${string}`
-): `0x${string}`[] {
-  const selector = extractSelectorFromCallData(callData).toLowerCase();
-  const strictDecodedSpenders = getDcaAlwaysStrictDecodedSpenders(callData, userAddress);
-  if (selector === DCA_SWAP_SELECTOR || selector === ARC_SWAP_ADAPTER_EXECUTE_SELECTOR) {
-    // Both shapes are executed through SharedExecutorProxy, which pulls USDC from the user first.
-    return normalizeDcaSpenderCandidates([
-      CONTRACT_ADDRESSES.sharedExecutorProxy as `0x${string}`,
-      ...strictDecodedSpenders,
-    ]);
-  }
-
-  const runtimeSpender = resolveDcaAllowanceSpenderAddress(callData, targetProtocol, routeSpenderAddress);
-  return normalizeDcaSpenderCandidates([runtimeSpender, ...strictDecodedSpenders]);
-}
+// extractSelectorFromCallData, extractAddressWordFromCalldata, getDcaDecodedSpenderCandidates,
+// normalizeDcaSpenderCandidates, resolveDcaAllowanceSpenderAddress, getDcaAllowanceSpenderCandidates,
+// getDcaAlwaysStrictDecodedSpenders, and getDcaStrictRequiredSpenders are all imported
+// from '../domain/dcaCalldata' (shared module — see that file for implementations).
 
 function parseDcaAllowancePrecheckPayload(rawBody: unknown): {
   userAddress: `0x${string}`;
