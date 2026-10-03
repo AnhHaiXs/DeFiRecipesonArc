@@ -146,6 +146,7 @@ export function SwapPanel() {
     }, 350);
 
     return () => window.clearTimeout(handle);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [amountIn, appFeeBps, from, minOutTouched, slippageBps, t, to]);
 
   useEffect(() => {
