@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CheckCircle2, Loader2, Send, TriangleAlert } from 'lucide-react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useAccount, useBalance, useChainId, useSwitchChain, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
@@ -46,7 +46,7 @@ export function SendPanel() {
   const [notice,    setNotice]    = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [switching, setSwitching] = useState(false);
 
-  const { writeContract, data: txHash, isPending, error: writeError } = useWriteContract();
+  const { writeContract, data: txHash, isPending, error: writeError, reset: resetWrite } = useWriteContract();
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash: txHash });
 
   const balance = balanceData ? Number(balanceData.value) / 10 ** balanceData.decimals : 0;
@@ -58,15 +58,22 @@ export function SendPanel() {
   const sufficientBal  = amountValid && amountNum <= balance;
   const canSend        = isConnected && recipientValid && amountValid && sufficientBal && !isPending && !isConfirming;
 
-  // Show write error in notice
-  if (writeError && (!notice || notice.type !== 'error')) {
-    setNotice({ type: 'error', text: writeError.message.split('\n')[0] });
-  }
-  if (isConfirmed && txHash && (!notice || notice.type !== 'success')) {
-    setNotice({ type: 'success', text: `Sent ${amount} USDC! Tx: ${txHash.slice(0, 10)}…` });
-    setAmount('');
-    setRecipient('');
-  }
+  // Reflect write error and confirmation in notice via effects (no setState in render body)
+  useEffect(() => {
+    if (writeError) {
+      setNotice({ type: 'error', text: writeError.message.split('\n')[0] });
+    }
+  }, [writeError]);
+
+  useEffect(() => {
+    if (isConfirmed && txHash) {
+      setNotice({ type: 'success', text: `Sent! Tx: ${txHash.slice(0, 10)}…` });
+      setAmount('');
+      setRecipient('');
+      resetWrite();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConfirmed, txHash]);
 
   async function handleSend() {
     if (!canSend) return;

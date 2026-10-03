@@ -82,9 +82,9 @@ export function BridgePanel() {
 
       const kit = getAppKit();
 
-      // Subscribe to all kit events for real-time bridge step progress.
-      // AppKit emits '*' as a catch-all that includes bridge step updates.
-      kit.on('*', (event: unknown) => {
+      // Subscribe to step events emitted by App Kit during the bridge lifecycle.
+      // Use 'bridge:stepUpdated' per the bridge-stablecoin skill; fall back to '*' catch-all.
+      function onBridgeEvent(event: unknown) {
         if (!event || typeof event !== 'object') return;
         const e = event as Record<string, unknown>;
         if (typeof e.name !== 'string' || typeof e.state !== 'string') return;
@@ -92,13 +92,24 @@ export function BridgePanel() {
           e.state === 'success' ? 'success' :
           e.state === 'error'   ? 'error'   : 'pending';
         updateStep(e.name, st, typeof e.txHash === 'string' ? e.txHash : undefined);
-      });
+      }
 
-      const result = await kit.bridge({
-        from: { adapter, chain: fromChain.kit },
-        to:   { adapter, chain: toChain.kit, recipientAddress: recipient },
-        amount,
-      });
+      // AppKit event emitter is typed as EventEmitter — cast to access .on/.off
+      type KitEmitter = { on: (e: string, cb: (v: unknown) => void) => void; off: (e: string, cb: (v: unknown) => void) => void };
+      const emitter = kit as unknown as KitEmitter;
+      emitter.on('bridge:stepUpdated', onBridgeEvent);
+
+      let result: Awaited<ReturnType<typeof kit.bridge>>;
+      try {
+        result = await kit.bridge({
+          from: { adapter, chain: fromChain.kit },
+          to:   { adapter, chain: toChain.kit, recipientAddress: recipient },
+          amount,
+        });
+      } finally {
+        // Always remove listener, even on error
+        emitter.off('bridge:stepUpdated', onBridgeEvent);
+      }
 
       // Ensure final states are reflected
       if (result.steps) {
