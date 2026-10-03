@@ -1,9 +1,8 @@
 {
-  "rootDirectory": "web",
   "framework": "nextjs",
-  "buildCommand": "node scripts/next-build.js",
+  "buildCommand": "cd web && node scripts/next-build.js",
   "outputDirectory": "web/.next",
-  "installCommand": "pnpm install --no-frozen-lockfile",
+  "installCommand": "cd web && pnpm install --no-frozen-lockfile",
   "env": {
     "NEXT_TELEMETRY_DISABLED": "1"
   }
