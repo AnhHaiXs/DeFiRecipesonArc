@@ -6,7 +6,7 @@ import { formatUnits } from 'viem';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useAccount, useBalance } from 'wagmi';
 import { CONTRACT_ADDRESSES } from '@/config/contracts';
-import { estimateSwap, executeSwap } from '@/lib/appkit/swap-client';
+import { estimateSwap, executeSwap, SWAP_REQUIRES_MAINNET } from '@/lib/appkit/swap-client';
 import { useLanguage } from '@/lib/i18n/LanguageProvider';
 
 type FxToken = 'USDC' | 'EURC';
@@ -58,7 +58,7 @@ async function recordSwapAction(input: {
 
 export function SwapPanel() {
   const { t } = useLanguage();
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, connector } = useAccount();
   const { data: usdcBalanceData } = useBalance({
     address: address,
     token: CONTRACT_ADDRESSES.usdc,
@@ -114,6 +114,7 @@ export function SwapPanel() {
           tokenIn: from,
           tokenOut: to,
           amountIn,
+          connector: connector ?? undefined,
         });
 
         if (id !== requestId.current) return;
@@ -202,6 +203,7 @@ export function SwapPanel() {
         stopLimit: isPositiveDecimal(minOut) ? minOut : undefined,
         appFeeBps: quote.appFeeBps,
         appFeeRecipient: appFeeRecipient,
+        connector: connector ?? undefined,
       });
 
       const recorded = await recordSwapAction({
@@ -240,6 +242,15 @@ export function SwapPanel() {
 
   return (
     <section className="glass-card p-5 sm:p-6">
+      {SWAP_REQUIRES_MAINNET ? (
+        <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-700 bg-amber-950/40 px-4 py-3 text-sm text-amber-200">
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+          <span>
+            USDC ↔ EURC swaps require <strong>Arc mainnet</strong> — the liquidity provider has no testnet route for this pair.
+            Set <code className="rounded bg-amber-900/60 px-1">NEXT_PUBLIC_ARC_CHAIN=Arc</code> to enable swapping on mainnet.
+          </span>
+        </div>
+      ) : null}
       <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-[0.22em] text-slate-400">{t('swapPanelEyebrow')}</p>

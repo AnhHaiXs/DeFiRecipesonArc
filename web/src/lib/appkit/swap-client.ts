@@ -3,6 +3,7 @@
 import { AppKit, SwapChain } from '@circle-fin/app-kit';
 import { createViemAdapterFromProvider } from '@circle-fin/adapter-viem-v2';
 import type { EIP1193Provider } from 'viem';
+import type { Connector } from 'wagmi';
 
 export type FxToken = 'USDC' | 'EURC';
 
@@ -16,6 +17,16 @@ export type ExecuteResult = {
   txHash?: string;
 };
 
+// Resolve chain from env. Defaults to Arc_Testnet.
+// USDC↔EURC swaps are only available on Arc mainnet (the LiFi aggregator has no
+// testnet liquidity for this pair). Set NEXT_PUBLIC_ARC_CHAIN=Arc for mainnet.
+const envChain = process.env.NEXT_PUBLIC_ARC_CHAIN ?? 'Arc_Testnet';
+export const SWAP_CHAIN: SwapChain =
+  (SwapChain as Record<string, SwapChain>)[envChain] ?? SwapChain.Arc_Testnet;
+
+// True when running on testnet — USDC↔EURC routes are unavailable.
+export const SWAP_REQUIRES_MAINNET = SWAP_CHAIN === SwapChain.Arc_Testnet;
+
 let cachedKit: AppKit | null = null;
 
 function kit() {
@@ -25,29 +36,42 @@ function kit() {
   return cachedKit;
 }
 
-function chain(): SwapChain {
-  const value = (process.env.NEXT_PUBLIC_ARC_CHAIN ?? 'Arc_Testnet') as keyof typeof SwapChain;
-  const resolved = SwapChain[value];
+// Prefer connector.getProvider() (wagmi-managed) over window.ethereum directly.
+// Falls back to window.ethereum for environments where no connector is passed.
+async function getAdapter(connector?: Connector) {
+  let provider: EIP1193Provider;
 
-  if (!resolved) {
-    throw new Error(`NEXT_PUBLIC_ARC_CHAIN must be a valid SwapChain identifier (got "${process.env.NEXT_PUBLIC_ARC_CHAIN ?? 'Arc_Testnet'}").`);
+  if (connector) {
+    provider = (await connector.getProvider()) as EIP1193Provider;
+  } else if (typeof window !== 'undefined' && window.ethereum) {
+    provider = window.ethereum as EIP1193Provider;
+  } else {
+    throw new Error('Connect a browser wallet to swap.');
   }
 
-  return resolved;
+  return createViemAdapterFromProvider({ provider });
 }
 
-async function getAdapter() {
-  if (typeof window === 'undefined' || !window.ethereum) {
-    throw new Error('Connect a browser wallet (for example MetaMask) to swap.');
+export async function estimateSwap({
+  tokenIn,
+  tokenOut,
+  amountIn,
+  connector,
+}: {
+  tokenIn: FxToken;
+  tokenOut: FxToken;
+  amountIn: string;
+  connector?: Connector;
+}): Promise<QuoteResult> {
+  if (SWAP_REQUIRES_MAINNET) {
+    throw new Error(
+      'USDC ↔ EURC swaps are not available on Arc Testnet — the liquidity provider has no testnet route for this pair. Switch to Arc mainnet to swap.'
+    );
   }
 
-  return createViemAdapterFromProvider({ provider: window.ethereum as EIP1193Provider });
-}
-
-export async function estimateSwap({ tokenIn, tokenOut, amountIn }: { tokenIn: FxToken; tokenOut: FxToken; amountIn: string }): Promise<QuoteResult> {
-  const adapter = await getAdapter();
+  const adapter = await getAdapter(connector);
   const result = await kit().estimateSwap({
-    from: { adapter, chain: chain() },
+    from: { adapter, chain: SWAP_CHAIN },
     tokenIn,
     tokenOut,
     amountIn,
@@ -69,6 +93,7 @@ export async function executeSwap({
   stopLimit,
   appFeeBps,
   appFeeRecipient,
+  connector,
 }: {
   tokenIn: FxToken;
   tokenOut: FxToken;
@@ -77,24 +102,35 @@ export async function executeSwap({
   stopLimit?: string;
   appFeeBps: number;
   appFeeRecipient: string;
+  connector?: Connector;
 }): Promise<ExecuteResult> {
-  const adapter = await getAdapter();
+  if (SWAP_REQUIRES_MAINNET) {
+    throw new Error(
+      'USDC ↔ EURC swaps are not available on Arc Testnet. Switch to Arc mainnet to swap.'
+    );
+  }
+
+  const adapter = await getAdapter(connector);
+
+  const feeConfig =
+    appFeeRecipient && appFeeRecipient !== '0x0000000000000000000000000000000000000000'
+      ? {
+          customFee: {
+            percentageBps: appFeeBps,
+            recipientAddress: appFeeRecipient,
+          },
+        }
+      : {};
+
   const result = await kit().swap({
-    from: { adapter, chain: chain() },
+    from: { adapter, chain: SWAP_CHAIN },
     tokenIn,
     tokenOut,
     amountIn,
     config: {
       slippageBps,
       ...(stopLimit ? { stopLimit } : {}),
-      ...(appFeeRecipient
-        ? {
-            customFee: {
-              percentageBps: appFeeBps,
-              recipientAddress: appFeeRecipient,
-            },
-          }
-        : {}),
+      ...feeConfig,
     },
   });
 
