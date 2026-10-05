@@ -811,35 +811,75 @@ function parseDcaAllowancePrecheckPayload(rawBody: unknown): {
   };
 }
 
+// Known-stable spender addresses for CIRCLE_DIRECT / ARC_LIFI_SWAP on Arc Testnet.
+// Used as fallback when the swap route service is temporarily unavailable (e.g. Circle 331001).
+// arc-studio-allow-onchain-literal
+const ARC_SWAP_ADAPTER_ADDRESS_FALLBACK = '0xbbd70b01a1cabc96d5b7b129ae1aaabdf50dd40b' as `0x${string}`; // arc-studio-allow-onchain-literal
+
 export async function precheckDcaAllowance(
   rawBody: unknown
 ): Promise<Record<string, unknown>> {
   const payload = parseDcaAllowancePrecheckPayload(rawBody);
 
-  const routePlan = await dcaSwapRouteClient.resolveRoute({
-    recipientAddress: payload.userAddress,
-    amountInBaseUnits: payload.perExecutionBaseUnits,
-    maxSlippageBps: payload.maxSlippageBps,
-    targetAssetSymbol: payload.targetAssetSymbol,
-  });
+  let routePlan: Awaited<ReturnType<typeof dcaSwapRouteClient.resolveRoute>> | null = null;
+  let routeUnavailable = false;
 
-  const runtimeSpender = resolveDcaAllowanceSpenderAddress(
-    routePlan.callData,
-    routePlan.targetProtocolAddress,
-    routePlan.spenderAddress
-  );
+  try {
+    routePlan = await dcaSwapRouteClient.resolveRoute({
+      recipientAddress: payload.userAddress,
+      amountInBaseUnits: payload.perExecutionBaseUnits,
+      maxSlippageBps: payload.maxSlippageBps,
+      targetAssetSymbol: payload.targetAssetSymbol,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('no route') || msg.includes('331001') || msg.includes('intermittent')) {
+      routeUnavailable = true;
+      console.warn(`[Keeper API] precheckDcaAllowance: swap route temporarily unavailable (${msg.slice(0, 80)}). Using static spender fallback.`);
+    } else {
+      throw err;
+    }
+  }
 
-  const requiredSpenders = getDcaAllowanceSpenderCandidates(
-    routePlan.callData,
-    routePlan.targetProtocolAddress,
-    routePlan.spenderAddress
-  );
-  const strictRequiredSpenders = getDcaStrictRequiredSpenders(
-    routePlan.callData,
-    routePlan.targetProtocolAddress,
-    routePlan.spenderAddress,
-    payload.userAddress
-  );
+  let runtimeSpender: `0x${string}`;
+  let requiredSpenders: `0x${string}`[];
+  let strictRequiredSpenders: `0x${string}`[];
+  let callDataSelector: string | null;
+  let decodedSpenders: `0x${string}`[];
+  let targetProtocolAddress: `0x${string}`;
+
+  if (routeUnavailable || !routePlan) {
+    // Fallback: use known static spenders — real on-chain allowance check still runs.
+    runtimeSpender = CONTRACT_ADDRESSES.sharedExecutorProxy as `0x${string}`;
+    requiredSpenders = [
+      CONTRACT_ADDRESSES.sharedExecutorProxy as `0x${string}`,
+      ARC_SWAP_ADAPTER_ADDRESS_FALLBACK,
+    ];
+    strictRequiredSpenders = [CONTRACT_ADDRESSES.sharedExecutorProxy as `0x${string}`];
+    callDataSelector = null;
+    decodedSpenders = [];
+    targetProtocolAddress = ARC_SWAP_ADAPTER_ADDRESS_FALLBACK;
+  } else {
+    runtimeSpender = resolveDcaAllowanceSpenderAddress(
+      routePlan.callData,
+      routePlan.targetProtocolAddress,
+      routePlan.spenderAddress
+    );
+    requiredSpenders = getDcaAllowanceSpenderCandidates(
+      routePlan.callData,
+      routePlan.targetProtocolAddress,
+      routePlan.spenderAddress
+    );
+    strictRequiredSpenders = getDcaStrictRequiredSpenders(
+      routePlan.callData,
+      routePlan.targetProtocolAddress,
+      routePlan.spenderAddress,
+      payload.userAddress
+    );
+    callDataSelector = extractSelectorFromCallData(routePlan.callData);
+    decodedSpenders = getDcaDecodedSpenderCandidates(routePlan.callData);
+    targetProtocolAddress = routePlan.targetProtocolAddress;
+  }
 
   const allowanceBySpender: Record<string, string> = {};
   for (const spender of requiredSpenders) {
@@ -853,7 +893,6 @@ export async function precheckDcaAllowance(
   }
 
   const currentAllowanceBaseUnits = allowanceBySpender[runtimeSpender.toLowerCase()] || '0';
-  const decodedSpenders = getDcaDecodedSpenderCandidates(routePlan.callData);
   const requiredForSchedulerBaseUnits = payload.perExecutionBaseUnits.toString();
   const requiredForActivationBaseUnits = payload.totalBudgetBaseUnits.toString();
   const isEnoughForScheduler = strictRequiredSpenders.every((spender) => {
@@ -871,8 +910,8 @@ export async function precheckDcaAllowance(
       userAddress: payload.userAddress,
       runtimeSpender,
       decodedAbiAddresses: decodedSpenders,
-      targetProtocolAddress: routePlan.targetProtocolAddress,
-      callDataSelector: extractSelectorFromCallData(routePlan.callData),
+      targetProtocolAddress,
+      callDataSelector,
       targetAssetSymbol: payload.targetAssetSymbol,
       maxSlippageBps: payload.maxSlippageBps,
       currentAllowanceBaseUnits,
@@ -883,6 +922,7 @@ export async function precheckDcaAllowance(
       allowanceBySpender,
       isEnoughForScheduler,
       isEnoughForActivation,
+      routeAvailable: !routeUnavailable,
       checkedAt: new Date().toISOString(),
     },
   };

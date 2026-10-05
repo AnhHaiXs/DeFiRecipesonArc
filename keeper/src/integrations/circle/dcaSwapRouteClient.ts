@@ -813,11 +813,10 @@ class LiFiDirectDcaSwapRouteClient implements DcaSwapRouteClient {
   constructor() {
     const rawBase = process.env.LIFI_API_BASE_URL?.trim();
     this.baseUrl = rawBase && rawBase.length > 0 ? rawBase.replace(/\/$/, '') : 'https://li.quest';
-    // IMPORTANT: Do NOT send x-lifi-api-key on /v1/quote requests.
-    // When a registered partner API key is attached, LI.FI enforces the partner's exchange
-    // whitelist and returns TOOL_NOT_ALLOWED for "fly" on Arc Testnet, even though the
-    // same route succeeds in anonymous (no-key) mode. The API key is reserved for future
-    // authenticated endpoints that explicitly require it (e.g. status, gas estimation).
+    // Do NOT send x-lifi-api-key: partner/registered keys enforce exchange whitelists
+    // and block the "fly" tool on Arc Testnet with TOOL_NOT_ALLOWED. Anonymous mode
+    // (no key) allows "fly" to be selected by LI.FI's public routing logic.
+    // Rate limiting (429) in anonymous mode is handled by the retry logic below.
     this.apiKey = undefined;
     this.integrator = normalizeLiFiIntegrator(process.env.LIFI_INTEGRATOR);
   }
@@ -860,6 +859,29 @@ class LiFiDirectDcaSwapRouteClient implements DcaSwapRouteClient {
       headers['x-lifi-api-key'] = this.apiKey;
     }
 
+    // Retry up to 5 times with exponential backoff for 429 rate-limit responses
+    const MAX_RETRIES = 5;
+    let lastError: Error = new Error('LI.FI Direct: no attempts made');
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        return await this._fetchPlan(url, headers, request);
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        const isRateLimit = lastError.message.includes('rate limit') || lastError.message.includes('429');
+        if (!isRateLimit) throw lastError; // non-429 error — don't retry
+        const delayMs = Math.min(2000 * Math.pow(2, attempt - 1) + Math.random() * 500, 30000);
+        console.warn(`[LI.FI Direct] Attempt ${attempt}/${MAX_RETRIES} rate-limited. Retrying in ${Math.round(delayMs)}ms…`);
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
+    throw lastError;
+  }
+
+  private async _fetchPlan(
+    url: string,
+    headers: Record<string, string>,
+    request: DcaSwapRouteRequest,
+  ): Promise<DcaSwapExecutionPlan> {
     let rawBody: string;
     let httpStatus: number;
 
@@ -885,7 +907,7 @@ class LiFiDirectDcaSwapRouteClient implements DcaSwapRouteClient {
         }
         if (httpStatus === 429 || isLiFiRateLimitError(detail)) {
           throw new Error(
-            'LI.FI Direct: rate limit exceeded (HTTP 429). Set LIFI_API_KEY for higher quota.'
+            'LI.FI Direct: rate limit exceeded (HTTP 429). Retrying with backoff…'
           );
         }
         throw new Error(`LI.FI Direct: HTTP ${httpStatus} — ${detail}`);
@@ -905,6 +927,11 @@ class LiFiDirectDcaSwapRouteClient implements DcaSwapRouteClient {
     }
 
     if (!isLiFiQuoteResponse(parsed)) {
+      // Check if LI.FI returned a 200 with a no-route body (code 1002)
+      const body = parsed as Record<string, unknown>;
+      if (typeof body.code === 'number' && (body.code === 1002 || body.code === 1011)) {
+        throw new Error('LI.FI Direct: no route available for this DCA swap request.');
+      }
       throw new Error(
         'LI.FI Direct: quote response is missing transactionRequest or estimate fields.'
       );
