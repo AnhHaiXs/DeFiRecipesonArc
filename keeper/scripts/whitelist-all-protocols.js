@@ -26,7 +26,9 @@ const ARC_TESTNET = defineChain({
   rpcUrls: { default: { http: ['https://rpc.testnet.arc.network/'] } },
 });
 
-const GUARDRAIL = '0xB9b1C570fa0F633bc5cc0B833078d749f108748d';
+const GUARDRAIL        = '0xB9b1C570fa0F633bc5cc0B833078d749f108748d';
+const AUTOCOMPOUNDER   = '0x6cB6eE2a33F497C1a682657f15A874dc675Fa773';
+const RECIPE_EXECUTOR  = '0x7A3e5F10c2C1E5F701d4a7E02dec84654F12C774';
 
 const ABI = [
   {
@@ -150,6 +152,47 @@ async function main() {
     console.log('');
   }
 
+  // ── Step 2: AutoCompounder.setExecutorApproval(RecipeExecutor, true) ──────────
+  console.log('--- AutoCompounder: approve RecipeExecutor ---');
+  console.log(`  AutoCompounder: ${AUTOCOMPOUNDER}`);
+  console.log(`  RecipeExecutor: ${RECIPE_EXECUTOR}`);
+
+  const AUTOCOMPOUNDER_ABI = [
+    {
+      name: 'approvedExecutors',
+      type: 'function',
+      inputs: [{ name: '', type: 'address' }],
+      outputs: [{ name: '', type: 'bool' }],
+      stateMutability: 'view',
+    },
+    {
+      name: 'setExecutorApproval',           // 0xb91849e5 — verified from bytecode
+      type: 'function',
+      inputs: [{ name: 'executor', type: 'address' }, { name: 'approved', type: 'bool' }],
+      outputs: [],
+      stateMutability: 'nonpayable',
+    },
+  ];
+
+  const isExecutorApproved = await publicClient.readContract({
+    address: AUTOCOMPOUNDER,
+    abi: AUTOCOMPOUNDER_ABI,
+    functionName: 'approvedExecutors',
+    args: [RECIPE_EXECUTOR],
+  });
+
+  if (isExecutorApproved) {
+    console.log('  ✅ RecipeExecutor already approved in AutoCompounder');
+  } else {
+    await sendAndWait(walletClient, publicClient, {
+      address: AUTOCOMPOUNDER,
+      abi: AUTOCOMPOUNDER_ABI,
+      functionName: 'setExecutorApproval',
+      args: [RECIPE_EXECUTOR, true],
+    }, `AutoCompounder.setExecutorApproval(RecipeExecutor, true)`);
+  }
+  console.log('');
+
   // Final verification
   console.log('=== Final verification ===');
   for (const p of PROTOCOLS) {
@@ -160,6 +203,15 @@ async function main() {
     console.log(`     isProtocolWhitelisted: ${protWL}`);
     console.log(`     isSelectorAllowed(${p.selector}): ${selWL}`);
   }
+
+  // AutoCompounder executor check
+  const execApproved = await publicClient.readContract({
+    address: AUTOCOMPOUNDER,
+    abi: [{ name:'approvedExecutors', type:'function', inputs:[{name:'',type:'address'}], outputs:[{name:'',type:'bool'}], stateMutability:'view' }],
+    functionName: 'approvedExecutors',
+    args: [RECIPE_EXECUTOR],
+  });
+  console.log(`${execApproved ? '✅' : '❌'} AutoCompounder.approvedExecutors(RecipeExecutor): ${execApproved}`);
 
   console.log('');
   console.log('Done. Rebuild server (git pull && tsc) then restart keeper.');
