@@ -1,6 +1,6 @@
 'use client';
 
-import React, { Suspense, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Wallet, ArrowUpRight, History, CheckCircle, Clock, AlertTriangle } from 'lucide-react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { formatUnits } from 'viem';
@@ -40,6 +40,7 @@ type SortMode = 'NEWEST' | 'OLDEST' | 'STATUS';
 const VALID_STATUS_FILTERS: StatusFilter[] = ['ALL', 'CONFIRMED', 'SUBMITTED', 'REVERTED', 'SIMULATING', 'SIMULATION_FAILED'];
 const VALID_SORT_MODES: SortMode[] = ['NEWEST', 'OLDEST', 'STATUS'];
 const DEFAULT_PAGE_SIZE = 10;
+const LOGS_AUTO_REFRESH_INTERVAL_MS = 15_000;
 
 interface LogsPageResponse {
   success?: boolean;
@@ -149,6 +150,8 @@ const PortfolioTrackerContent: React.FC = () => {
   const [pageSize] = useState(DEFAULT_PAGE_SIZE);
   const [totalCount, setTotalCount] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+  const isMountedRef = useRef(true);
+  const activeLogsRequestRef = useRef(0);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>(() => {
     const queryStatus = (safeSearchParams.get('status') || 'ALL').toUpperCase() as StatusFilter;
     return VALID_STATUS_FILTERS.includes(queryStatus) ? queryStatus : 'ALL';
@@ -194,96 +197,120 @@ const PortfolioTrackerContent: React.FC = () => {
   }, [router, safePathname, safeSearchParams, sortMode, statusFilter]);
 
   useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     setPage(1);
   }, [statusFilter, sortMode]);
 
-  useEffect(() => {
-    let disposed = false;
+  const fetchAuditLogs = useCallback(async (options?: { silent?: boolean }) => {
+    const isSilentRefresh = options?.silent === true;
+    const requestId = activeLogsRequestRef.current + 1;
+    activeLogsRequestRef.current = requestId;
 
-    const fetchLogs = async () => {
+    const canCommitState = (): boolean => isMountedRef.current && activeLogsRequestRef.current === requestId;
+
+    if (!isSilentRefresh) {
+      setIsLoadingLogs(true);
+    }
+
+    try {
       if (!address) {
-        if (!disposed) {
+        if (canCommitState()) {
           setAuditLogs([]);
           setLogsError(null);
           setTotalCount(0);
           setHasMore(false);
-          setIsLoadingLogs(false);
         }
         return;
       }
 
-      try {
-        setIsLoadingLogs(true);
-        const params = new URLSearchParams({
-          limit: String(pageSize),
-          offset: String((page - 1) * pageSize),
-          userAddress: address.toLowerCase(),
-          sort: sortMode,
-        });
+      const params = new URLSearchParams({
+        limit: String(pageSize),
+        offset: String((page - 1) * pageSize),
+        userAddress: address.toLowerCase(),
+        sort: sortMode,
+      });
 
-        if (statusFilter !== 'ALL') {
-          params.set('status', statusFilter);
-        }
-
-        const response = await fetch(`/api/logs?${params.toString()}`, {
-          method: 'GET',
-          cache: 'no-store',
-        });
-        const payload = (await response.json().catch(() => null)) as LogsPageResponse | null;
-
-        if (!response.ok || !payload?.success || !Array.isArray(payload.logs)) {
-          throw new Error(payload?.error || `Failed to load logs (${response.status}).`);
-        }
-
-        const mappedLogs: AuditLog[] = payload.logs.map((item) => ({
-          timestampMs: Date.parse(item.timestampIso),
-          id: item.id,
-          recipeName: toRecipeName(item.recipeType),
-          userAddress: item.userAddress,
-          txHash: item.txHash && item.txHash.startsWith('0x') ? (item.txHash as `0x${string}`) : null,
-          timestampRelative: item.timestamp,
-          timestampIso: item.timestampIso,
-          status: item.status,
-          gasUsedUsdc: item.gasUsedUsdc,
-          errorMessage: item.errorMessage || null,
-        }));
-
-        if (!disposed) {
-          const nextTotal = Number.isFinite(payload.total) ? Number(payload.total) : mappedLogs.length;
-          const nextPage = Number.isFinite(payload.page) ? Number(payload.page) : page;
-          const nextHasMore = typeof payload.hasMore === 'boolean'
-            ? payload.hasMore
-            : nextPage * pageSize < nextTotal;
-
-          setAuditLogs(mappedLogs);
-          setTotalCount(Math.max(0, nextTotal));
-          setHasMore(nextHasMore);
-          setLogsError(null);
-          if (nextPage > 1 && nextPage > Math.max(1, Math.ceil(nextTotal / pageSize))) {
-            setPage(Math.max(1, Math.ceil(nextTotal / pageSize)));
-          }
-        }
-      } catch (error: unknown) {
-        if (!disposed) {
-          const message = error instanceof Error ? error.message : 'Unknown logs fetch error.';
-          setLogsError(message);
-          setAuditLogs([]);
-          setTotalCount(0);
-          setHasMore(false);
-        }
-      } finally {
-        if (!disposed) {
-          setIsLoadingLogs(false);
-        }
+      if (statusFilter !== 'ALL') {
+        params.set('status', statusFilter);
       }
-    };
 
-    void fetchLogs();
+      const response = await fetch(`/api/logs?${params.toString()}`, {
+        method: 'GET',
+        cache: 'no-store',
+      });
+      const payload = (await response.json().catch(() => null)) as LogsPageResponse | null;
+
+      if (!response.ok || !payload?.success || !Array.isArray(payload.logs)) {
+        throw new Error(payload?.error || `Failed to load logs (${response.status}).`);
+      }
+
+      const mappedLogs: AuditLog[] = payload.logs.map((item) => ({
+        timestampMs: Date.parse(item.timestampIso),
+        id: item.id,
+        recipeName: toRecipeName(item.recipeType),
+        userAddress: item.userAddress,
+        txHash: item.txHash && item.txHash.startsWith('0x') ? (item.txHash as `0x${string}`) : null,
+        timestampRelative: item.timestamp,
+        timestampIso: item.timestampIso,
+        status: item.status,
+        gasUsedUsdc: item.gasUsedUsdc,
+        errorMessage: item.errorMessage || null,
+      }));
+
+      if (!canCommitState()) {
+        return;
+      }
+
+      const nextTotal = Number.isFinite(payload.total) ? Number(payload.total) : mappedLogs.length;
+      const nextPage = Number.isFinite(payload.page) ? Number(payload.page) : page;
+      const nextHasMore = typeof payload.hasMore === 'boolean'
+        ? payload.hasMore
+        : nextPage * pageSize < nextTotal;
+
+      setAuditLogs(mappedLogs);
+      setTotalCount(Math.max(0, nextTotal));
+      setHasMore(nextHasMore);
+      setLogsError(null);
+      if (nextPage > 1 && nextPage > Math.max(1, Math.ceil(nextTotal / pageSize))) {
+        setPage(Math.max(1, Math.ceil(nextTotal / pageSize)));
+      }
+    } catch (error: unknown) {
+      if (canCommitState()) {
+        const message = error instanceof Error ? error.message : 'Unknown logs fetch error.';
+        setLogsError(message);
+        setAuditLogs([]);
+        setTotalCount(0);
+        setHasMore(false);
+      }
+    } finally {
+      if (canCommitState()) {
+        setIsLoadingLogs(false);
+      }
+    }
+  }, [address, page, pageSize, sortMode, statusFilter]);
+
+  useEffect(() => {
+    void fetchAuditLogs();
+  }, [fetchAuditLogs]);
+
+  useEffect(() => {
+    if (!address) {
+      return;
+    }
+
+    const refreshTimerId = window.setInterval(() => {
+      void fetchAuditLogs({ silent: true });
+    }, LOGS_AUTO_REFRESH_INTERVAL_MS);
 
     return () => {
-      disposed = true;
+      window.clearInterval(refreshTimerId);
     };
-  }, [address, page, pageSize, sortMode, statusFilter]);
+  }, [address, fetchAuditLogs]);
 
   const visibleLogs = useMemo(() => {
     const filtered = statusFilter === 'ALL'

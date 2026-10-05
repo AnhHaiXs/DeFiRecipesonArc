@@ -4,5 +4,7 @@
         "npm audit": true,
         "Out-File": true,
         "npm test": true
-    }
+    },
+    "chat.agentHost.agentDebugLog.enabled": true,
+    "chat.agentHost.ahpJsonlLoggingEnabled": true
 }

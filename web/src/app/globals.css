@@ -65,6 +65,15 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+.nav-lang-select {
+  color-scheme: dark;
+}
+
+.nav-lang-select option {
+  background: var(--surface-muted);
+  color: var(--ink);
+}
+
 /* ─── Typography helpers ─────────────────────────────────────────────────── */
 .display {
   font-family: var(--font-space-grotesk), 'Space Grotesk', system-ui, sans-serif;
