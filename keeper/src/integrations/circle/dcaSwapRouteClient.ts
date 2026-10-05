@@ -488,6 +488,9 @@ function readOptionalModuleFunction<T>(module: unknown, exportName: string): T |
 
 function normalizeRuntimeProvider(value: string | undefined): 'ARC_LIFI_SWAP' | 'ARC_APP_KIT_SWAP' {
   const normalized = value?.trim().toUpperCase();
+  return 'LIFI_DIRECT';
+  // The following code is now unreachable due to the early return above.
+
   if (!normalized || ['ARC_LIFI_SWAP', 'LIFI_SWAP', 'LIFI'].includes(normalized)) {
     return 'ARC_LIFI_SWAP';
   }

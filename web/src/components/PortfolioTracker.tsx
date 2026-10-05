@@ -470,7 +470,7 @@ const PortfolioTrackerContent: React.FC = () => {
               id="audit-status-filter"
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs font-semibold text-slate-200 focus:border-blue-500 focus:outline-none"
+              className="app-dark-select w-full rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs font-semibold text-slate-200 focus:border-blue-500 focus:outline-none"
             >
               <option value="ALL">ALL</option>
               <option value="CONFIRMED">CONFIRMED</option>
@@ -489,7 +489,7 @@ const PortfolioTrackerContent: React.FC = () => {
               id="audit-sort-mode"
               value={sortMode}
               onChange={(event) => setSortMode(event.target.value as SortMode)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs font-semibold text-slate-200 focus:border-blue-500 focus:outline-none"
+              className="app-dark-select w-full rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs font-semibold text-slate-200 focus:border-blue-500 focus:outline-none"
             >
               <option value="NEWEST">{t('newest')}</option>
               <option value="OLDEST">{t('oldest')}</option>

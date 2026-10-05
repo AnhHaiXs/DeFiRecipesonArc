@@ -169,8 +169,14 @@ export const Navbar: React.FC = () => {
             value={lang}
             onChange={e => setLang(e.target.value as 'en' | 'vi')}
             aria-label={t('navLanguage')}
-            className="rounded-lg border px-2.5 py-1.5 text-xs font-semibold text-ink cursor-pointer"
-            style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}
+            className="nav-lang-select app-dark-select rounded-lg border px-2.5 py-1.5 text-xs font-semibold cursor-pointer"
+            style={{
+              backgroundColor: 'var(--surface-muted)',
+              color: 'var(--ink)',
+              borderColor: 'var(--border)',
+              WebkitTextFillColor: 'var(--ink)',
+              colorScheme: 'dark',
+            }}
           >
             <option value="en">EN</option>
             <option value="vi">VI</option>
@@ -251,8 +257,14 @@ export const Navbar: React.FC = () => {
               value={lang}
               onChange={e => setLang(e.target.value as 'en' | 'vi')}
               aria-label={t('navLanguage')}
-              className="rounded-lg border px-2 py-1 text-xs font-semibold text-ink"
-              style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}
+              className="nav-lang-select app-dark-select rounded-lg border px-2 py-1 text-xs font-semibold"
+              style={{
+                backgroundColor: 'var(--surface-muted)',
+                color: 'var(--ink)',
+                borderColor: 'var(--border)',
+                WebkitTextFillColor: 'var(--ink)',
+                colorScheme: 'dark',
+              }}
             >
               <option value="en">EN</option>
               <option value="vi">VI</option>

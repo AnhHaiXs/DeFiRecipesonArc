@@ -310,7 +310,7 @@ export function SwapPanel() {
                   <select
                     value={String(slippageBps)}
                     onChange={(event) => setSlippageBps(Number(event.target.value))}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-medium text-slate-100 outline-none transition focus:border-blue-500"
+                    className="app-dark-select w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-medium text-slate-100 outline-none transition focus:border-blue-500"
                   >
                     {SLIPPAGE_PRESETS_BPS.map((bps) => (
                       <option key={bps} value={String(bps)}>
@@ -372,7 +372,7 @@ export function SwapPanel() {
             <select
               value={from}
               onChange={(event) => setFrom(event.target.value as FxToken)}
-              className="h-10 shrink-0 rounded-full border border-slate-700 bg-slate-950 px-3 text-sm font-medium text-slate-100 outline-none transition focus:border-blue-500"
+              className="app-dark-select h-10 shrink-0 rounded-full border border-slate-700 bg-slate-950 px-3 text-sm font-medium text-slate-100 outline-none transition focus:border-blue-500"
             >
               <option value="USDC">USDC</option>
               <option value="EURC">EURC</option>
