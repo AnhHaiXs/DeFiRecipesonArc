@@ -1133,7 +1133,18 @@ export function createDcaSwapRouteClientFromRuntime(): DcaSwapRouteClient {
   }
 
   if (provider === 'CURVE_DIRECT') {
-    return new CurveDirectDcaSwapRouteClient();
+    // DEPRECATED: CurveDirectDcaSwapRouteClient generates calldata that wraps Curve pool calls
+    // inside ArcSwapAdapter.execute() with an empty signature. ArcSwapAdapter (Circle-deployed,
+    // 0xbbd70b01) always verifies an EIP-712 signature from Circle Stablecoin Service regardless
+    // of execId — there is no unsigned/permissionless path. Empty signatures cause InvalidSignature().
+    // RecipeExecutor has no built-in approve(), so calling Curve pool directly is not possible either.
+    // Use LIFI_DIRECT instead — it obtains a signed quote from LI.FI which ArcSwapAdapter accepts.
+    console.warn(
+      '[Config Warning] DCA_ROUTE_PROVIDER=CURVE_DIRECT is deprecated and non-functional. ' +
+      'ArcSwapAdapter always verifies Circle EIP-712 signatures; empty signatures cause InvalidSignature(). ' +
+      'Falling back to LIFI_DIRECT. Set DCA_ROUTE_PROVIDER=LIFI_DIRECT in .env to suppress this warning.'
+    );
+    return new LiFiDirectDcaSwapRouteClient();
   }
 
   // Default: ARC_LIFI_SWAP (SDK-based) with App Kit fallback
