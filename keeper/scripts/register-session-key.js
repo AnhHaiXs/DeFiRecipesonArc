@@ -17,6 +17,9 @@
  *   RPC_URL               default: https://rpc.testnet.arc.io/
  */
 
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+
 const { createWalletClient, createPublicClient, http, encodeFunctionData } = require('viem');
 const { privateKeyToAccount } = require('viem/accounts');
 
@@ -59,10 +62,13 @@ const IS_VALID_ABI = [{
 }];
 
 async function main() {
+  // NOTE: Đây phải là private key của USER (người dùng), không phải keeper.
+  // KEEPER_PRIVATE_KEY trong .env là key của keeper EOA — không dùng được ở đây.
   const userKey = process.env.USER_PRIVATE_KEY;
   if (!userKey) {
     console.error('ERROR: USER_PRIVATE_KEY env var is required.');
-    console.error('Usage: USER_PRIVATE_KEY=0x<key> node keeper/scripts/register-session-key.js');
+    console.error('  This must be the PRIVATE KEY OF THE USER WALLET, not the keeper.');
+    console.error('  Usage: USER_PRIVATE_KEY=0x<user_key> node keeper/scripts/register-session-key.js');
     process.exit(1);
   }
 

@@ -12,6 +12,10 @@
  *   setSelectorWhitelist(address,bytes4,bool) = 0xdc6b8812
  */
 
+const path = require('path');
+// Load .env từ keeper/ directory (file nằm cùng cấp với package.json)
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+
 const { createPublicClient, createWalletClient, http, defineChain } = require('viem');
 const { privateKeyToAccount } = require('viem/accounts');
 
@@ -87,10 +91,12 @@ async function sendAndWait(walletClient, publicClient, args, label) {
 }
 
 async function main() {
-  const pk = process.env.OWNER_PRIVATE_KEY;
+  // Priority: CLI env var OWNER_PRIVATE_KEY → KEEPER_PRIVATE_KEY từ .env
+  const pk = process.env.OWNER_PRIVATE_KEY || process.env.KEEPER_PRIVATE_KEY;
   if (!pk) {
-    console.error('ERROR: OWNER_PRIVATE_KEY env var required.');
-    console.error('Usage: OWNER_PRIVATE_KEY=0x<key> node keeper/scripts/whitelist-all-protocols.js');
+    console.error('ERROR: No private key found.');
+    console.error('  Option 1 (recommended): set KEEPER_PRIVATE_KEY in keeper/.env');
+    console.error('  Option 2: OWNER_PRIVATE_KEY=0x<key> node keeper/scripts/whitelist-all-protocols.js');
     process.exit(1);
   }
 
