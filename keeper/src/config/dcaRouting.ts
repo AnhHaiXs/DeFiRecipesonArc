@@ -15,6 +15,18 @@ export const ARC_SWAP_ADAPTER_EXECUTE_SELECTOR = '0xaa3e079c' as const;
 // Source: li.quest/v1/quote?fromChain=5042002&toChain=5042002&fromToken=USDC&toToken=EURC
 export const LIFI_FLY_DEX_ROUTER_ARC_TESTNET = '0xff70f4a1d11995621854f3692acf286d8acd04b2' as const;
 
+// Curve StableSwap pool WUSDC/EURC on Arc Testnet (chainId=5042002).
+// Verified on-chain 2026-10-05:
+//   coin[0] = USDC (0x3600...), coin[1] = EURC (0x89B5...)
+//   balances: ~170k USDC / ~18k EURC (4935 LP holders)
+//   get_dy(0, 1, 1_000_000) = ~891_883 (0.89 EURC per 1 USDC, skewed pool)
+//   exchange(i=0, j=1, dx, min_dy) — approve pool as spender before calling
+//   Source: explorer.testnet.arc.io/address/0x0714027E44802b2Ff76389daF5371990CC3a4C24
+export const CURVE_USDC_EURC_POOL_ARC_TESTNET = '0x0714027e44802b2ff76389daf5371990cc3a4c24' as const;
+// Coin indices for CURVE_USDC_EURC_POOL_ARC_TESTNET
+export const CURVE_POOL_USDC_INDEX = 0 as const;   // coin[0] = USDC
+export const CURVE_POOL_EURC_INDEX = 1 as const;   // coin[1] = EURC
+
 
 export const ARC_TESTNET_SUPPORTED_TOKENS = ['USDC', 'EURC', 'cirBTC'] as const;
 export type ArcTestnetTokenSymbol = (typeof ARC_TESTNET_SUPPORTED_TOKENS)[number];

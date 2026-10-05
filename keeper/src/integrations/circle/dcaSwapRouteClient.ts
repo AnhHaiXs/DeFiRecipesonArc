@@ -3,6 +3,9 @@ import {
   ARC_EURC_ADDRESS,
   ARC_SWAP_ADAPTER_ADDRESS,
   ARC_USDC_ADDRESS,
+  CURVE_POOL_EURC_INDEX,
+  CURVE_POOL_USDC_INDEX,
+  CURVE_USDC_EURC_POOL_ARC_TESTNET,
   LIFI_FLY_DEX_ROUTER_ARC_TESTNET,
 } from '../../config/dcaRouting';
 import { arcTestnet } from 'viem/chains';
@@ -487,7 +490,9 @@ function readOptionalModuleFunction<T>(module: unknown, exportName: string): T |
   }
 }
 
-function normalizeRuntimeProvider(value: string | undefined): 'ARC_LIFI_SWAP' | 'ARC_APP_KIT_SWAP' | 'LIFI_DIRECT' {
+function normalizeRuntimeProvider(
+  value: string | undefined
+): 'ARC_LIFI_SWAP' | 'ARC_APP_KIT_SWAP' | 'LIFI_DIRECT' | 'CURVE_DIRECT' {
   const normalized = value?.trim().toUpperCase();
   if (!normalized || ['ARC_LIFI_SWAP', 'LIFI_SWAP', 'LIFI'].includes(normalized)) {
     return 'ARC_LIFI_SWAP';
@@ -501,8 +506,12 @@ function normalizeRuntimeProvider(value: string | undefined): 'ARC_LIFI_SWAP' | 
     return 'LIFI_DIRECT';
   }
 
+  if (['CURVE_DIRECT', 'CURVE', 'CURVE_STABLE'].includes(normalized)) {
+    return 'CURVE_DIRECT';
+  }
+
   throw new Error(
-    `Unsupported DCA_ROUTE_PROVIDER=${value}. Supported values: ARC_LIFI_SWAP (aliases: LIFI_SWAP, LIFI), ARC_APP_KIT_SWAP (aliases: APP_KIT_SWAP, APP_KIT), LIFI_DIRECT (aliases: LIFI_REST, LIFI_API).`
+    `Unsupported DCA_ROUTE_PROVIDER=${value}. Supported: ARC_LIFI_SWAP, ARC_APP_KIT_SWAP, LIFI_DIRECT, CURVE_DIRECT.`
   );
 }
 
@@ -923,6 +932,142 @@ class LiFiDirectDcaSwapRouteClient implements DcaSwapRouteClient {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phương án C: Curve StableSwap trực tiếp (không cần LI.FI API)
+//
+// Gọi CurveStableSwap.exchange(i, j, dx, min_dy) trực tiếp trên pool
+// WUSDC/EURC tại CURVE_USDC_EURC_POOL_ARC_TESTNET. Không phụ thuộc LI.FI API,
+// không cần API key. Quote qua get_dy() trên-chain trước khi encode calldata.
+//
+// Kích hoạt: DCA_ROUTE_PROVIDER=CURVE_DIRECT
+//
+// Guardrail cần whitelist:
+//   RecipeGuardrail.setProtocolWhitelist(CURVE_USDC_EURC_POOL_ARC_TESTNET, true)
+//   RecipeGuardrail.setSelectorWhitelist(CURVE_USDC_EURC_POOL_ARC_TESTNET, 0x3df02124, true)
+//   USDC.approve(CURVE_USDC_EURC_POOL_ARC_TESTNET, <perExecutionAmount>)
+//
+// exchange(int128,int128,uint256,uint256) selector = 0x3df02124
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CURVE_EXCHANGE_SELECTOR = '0x3df02124' as const; // exchange(int128,int128,uint256,uint256)
+
+// ABI encode int128 as 32-byte two's complement (left-padded)
+function encodeInt128(value: number): string {
+  if (value < 0) {
+    // Two's complement for negative — not needed here but kept for correctness
+    const twosComp = BigInt(2 ** 256) + BigInt(value);
+    return twosComp.toString(16).padStart(64, '0');
+  }
+  return BigInt(value).toString(16).padStart(64, '0');
+}
+
+function encodeUint256(value: bigint): string {
+  return value.toString(16).padStart(64, '0');
+}
+
+function buildCurveExchangeCalldata(
+  i: number,
+  j: number,
+  dx: bigint,
+  minDy: bigint
+): `0x${string}` {
+  return (
+    CURVE_EXCHANGE_SELECTOR +
+    encodeInt128(i) +
+    encodeInt128(j) +
+    encodeUint256(dx) +
+    encodeUint256(minDy)
+  ) as `0x${string}`;
+}
+
+class CurveDirectDcaSwapRouteClient implements DcaSwapRouteClient {
+  private readonly rpcUrl: string;
+
+  constructor() {
+    // Use Arc Testnet public RPC — no proxy needed for read calls
+    this.rpcUrl = 'https://rpc.testnet.arc.network/';
+  }
+
+  private async getDy(dx: bigint, fromIndex: number, toIndex: number): Promise<bigint> {
+    // get_dy(int128 i, int128 j, uint256 dx) -> uint256
+    // selector: keccak256("get_dy(int128,int128,uint256)")[:4] = 0x5e0d443f
+    const calldata =
+      '0x5e0d443f' +
+      encodeInt128(fromIndex) +
+      encodeInt128(toIndex) +
+      encodeUint256(dx);
+
+    const response = await fetch(this.rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'eth_call',
+        params: [{ to: CURVE_USDC_EURC_POOL_ARC_TESTNET, data: calldata }, 'latest'],
+        id: 1,
+      }),
+    });
+
+    const json = (await response.json()) as { result?: string; error?: { message: string } };
+
+    if (json.error) {
+      throw new Error(`Curve get_dy RPC error: ${json.error.message}`);
+    }
+
+    const result = json.result;
+    if (!result || result === '0x') {
+      throw new Error('Curve get_dy returned empty result.');
+    }
+
+    return BigInt(result);
+  }
+
+  private getIndices(targetAssetSymbol: string): { fromIndex: number; toIndex: number } {
+    if (targetAssetSymbol === 'EURC') {
+      return { fromIndex: CURVE_POOL_USDC_INDEX, toIndex: CURVE_POOL_EURC_INDEX };
+    }
+    // cirBTC not available on Curve pool — fall through to error
+    throw new Error(
+      `CurveDirectDcaSwapRouteClient: unsupported targetAssetSymbol=${targetAssetSymbol}. ` +
+      `Only EURC is supported via the WUSDC/EURC Curve pool on Arc Testnet.`
+    );
+  }
+
+  async resolveRoute(request: DcaSwapRouteRequest): Promise<DcaSwapExecutionPlan> {
+    const { fromIndex, toIndex } = this.getIndices(request.targetAssetSymbol);
+
+    // Quote on-chain before encoding calldata
+    const quotedDy = await this.getDy(request.amountInBaseUnits, fromIndex, toIndex);
+
+    // Apply slippage to quoted amount
+    const minDy =
+      quotedDy > 0n
+        ? (quotedDy * BigInt(10_000 - request.maxSlippageBps)) / 10_000n
+        : fallbackMinOutFromInput(request.amountInBaseUnits, request.maxSlippageBps);
+
+    const callData = buildCurveExchangeCalldata(
+      fromIndex,
+      toIndex,
+      request.amountInBaseUnits,
+      minDy
+    );
+
+    console.log(
+      `[Curve Direct] Quote resolved pool=${CURVE_USDC_EURC_POOL_ARC_TESTNET} ` +
+      `from=USDC[${fromIndex}] to=${request.targetAssetSymbol}[${toIndex}] ` +
+      `amountIn=${request.amountInBaseUnits.toString()} ` +
+      `quotedDy=${quotedDy.toString()} minDy=${minDy.toString()}`
+    );
+
+    return {
+      targetProtocolAddress: CURVE_USDC_EURC_POOL_ARC_TESTNET,
+      callData,
+      minSwapAssetOutBaseUnits: minDy,
+      spenderAddress: CURVE_USDC_EURC_POOL_ARC_TESTNET,
+    };
+  }
+}
+
 function createAppKitDcaSwapRouteClient(): DcaSwapRouteClient {
   return new AppKitDcaSwapRouteClient();
 }
@@ -936,6 +1081,10 @@ export function createDcaSwapRouteClientFromRuntime(): DcaSwapRouteClient {
 
   if (provider === 'LIFI_DIRECT') {
     return new LiFiDirectDcaSwapRouteClient();
+  }
+
+  if (provider === 'CURVE_DIRECT') {
+    return new CurveDirectDcaSwapRouteClient();
   }
 
   // Default: ARC_LIFI_SWAP (SDK-based) with App Kit fallback
