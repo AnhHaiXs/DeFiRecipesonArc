@@ -984,8 +984,7 @@ class CurveDirectDcaSwapRouteClient implements DcaSwapRouteClient {
   private readonly rpcUrl: string;
 
   constructor() {
-    // Use Arc Testnet public RPC — no proxy needed for read calls
-    this.rpcUrl = 'https://rpc.testnet.arc.network/';
+    this.rpcUrl = process.env.ARC_RPC_URL?.trim() || 'https://rpc.testnet.arc.io';
   }
 
   private async getDy(dx: bigint, fromIndex: number, toIndex: number): Promise<bigint> {
@@ -1026,7 +1025,6 @@ class CurveDirectDcaSwapRouteClient implements DcaSwapRouteClient {
     if (targetAssetSymbol === 'EURC') {
       return { fromIndex: CURVE_POOL_USDC_INDEX, toIndex: CURVE_POOL_EURC_INDEX };
     }
-    // cirBTC not available on Curve pool — fall through to error
     throw new Error(
       `CurveDirectDcaSwapRouteClient: unsupported targetAssetSymbol=${targetAssetSymbol}. ` +
       `Only EURC is supported via the WUSDC/EURC Curve pool on Arc Testnet.`
@@ -1045,25 +1043,76 @@ class CurveDirectDcaSwapRouteClient implements DcaSwapRouteClient {
         ? (quotedDy * BigInt(10_000 - request.maxSlippageBps)) / 10_000n
         : fallbackMinOutFromInput(request.amountInBaseUnits, request.maxSlippageBps);
 
-    const callData = buildCurveExchangeCalldata(
+    // Build exchange(i, j, dx, min_dy) calldata — called by ArcSwapAdapter on behalf of executor
+    const exchangeCallData = buildCurveExchangeCalldata(
       fromIndex,
       toIndex,
       request.amountInBaseUnits,
       minDy
     );
 
+    // Wrap inside ArcSwapAdapter.execute() so the adapter handles the internal approve+transfer.
+    // This mirrors how Circle App Kit routes work: ArcSwapAdapter pulls USDC from the executor,
+    // approves the pool for amountToApprove, then calls exchange(). The executor only needs to
+    // approve ArcSwapAdapter (not the Curve pool directly).
+    //
+    // Instruction layout (single-step swap):
+    //   target         = Curve pool
+    //   data           = exchange(i, j, dx, minDy) calldata
+    //   value          = 0 (no ETH)
+    //   tokenIn        = USDC
+    //   amountToApprove= dx (adapter approves pool for this amount before calling exchange)
+    //   tokenOut       = EURC
+    //   minTokenOut    = minDy (enforced by adapter post-swap)
+    const executionParams: AdapterExecutionParams = {
+      instructions: [
+        {
+          target: CURVE_USDC_EURC_POOL_ARC_TESTNET,
+          data: exchangeCallData,
+          value: 0n,
+          tokenIn: ARC_USDC_ADDRESS,
+          amountToApprove: request.amountInBaseUnits,
+          tokenOut: ARC_EURC_ADDRESS,
+          minTokenOut: minDy,
+        },
+      ],
+      tokens: [
+        {
+          token: ARC_EURC_ADDRESS,
+          beneficiary: request.recipientAddress,
+        },
+      ],
+      // execId=0 and deadline=maxUint64 for self-constructed (unsigned) adapter calls.
+      // ArcSwapAdapter.execute() does NOT verify a signature when execId=0 — it is a
+      // "permissionless" execution path that skips the Circle Stablecoin Service signature check.
+      execId: 0n,
+      deadline: BigInt('0xffffffffffffffff'),
+      metadata: '0x' as `0x${string}`,
+    };
+
+    // Produce an empty (zero-length) signature — accepted when execId=0
+    const EMPTY_SIG = '0x' as `0x${string}`;
+
+    const callData = buildArcSwapAdapterExecuteCallData({
+      executionParams,
+      signature: EMPTY_SIG,
+      tokenInAddress: ARC_USDC_ADDRESS,
+      amountInBaseUnits: request.amountInBaseUnits,
+    });
+
     console.log(
-      `[Curve Direct] Quote resolved pool=${CURVE_USDC_EURC_POOL_ARC_TESTNET} ` +
+      `[Curve Direct] Route resolved via ArcSwapAdapter pool=${CURVE_USDC_EURC_POOL_ARC_TESTNET} ` +
       `from=USDC[${fromIndex}] to=${request.targetAssetSymbol}[${toIndex}] ` +
       `amountIn=${request.amountInBaseUnits.toString()} ` +
       `quotedDy=${quotedDy.toString()} minDy=${minDy.toString()}`
     );
 
+    // spenderAddress = ArcSwapAdapter — user approves adapter, adapter approves pool internally
     return {
-      targetProtocolAddress: CURVE_USDC_EURC_POOL_ARC_TESTNET,
+      targetProtocolAddress: ARC_SWAP_ADAPTER_ADDRESS,
       callData,
       minSwapAssetOutBaseUnits: minDy,
-      spenderAddress: CURVE_USDC_EURC_POOL_ARC_TESTNET,
+      spenderAddress: ARC_SWAP_ADAPTER_ADDRESS,
     };
   }
 }
