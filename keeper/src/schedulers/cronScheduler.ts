@@ -77,6 +77,7 @@ const executorNotApprovedHintsLogged = new Set<string>();
 const userExecutionPausedHintsLogged = new Set<string>();
 const allowanceExceededHintsLogged = new Set<string>();
 const balanceExceededHintsLogged = new Set<string>();
+const unknownRevertSignatureHintsLogged = new Set<string>();
 const allowancePrecheckHintsLogged = new Set<string>();
 const unsupportedDcaModeHintsLogged = new Set<string>();
 const exceededSpendLimitHintsLogged = new Set<string>();
@@ -126,6 +127,10 @@ const ERC20_BALANCE_OF_ABI = [
 const RECIPE_SELECTOR_LABEL: Partial<Record<RecipeType, string>> = {
   AUTO_COMPOUNDER: 'claimRewardsForUser(address)',
   RECURRING_DCA: 'swapExactTokensForTokens(uint256,uint256,address[],address,uint256)',
+};
+
+const KNOWN_DOWNSTREAM_CUSTOM_ERROR_SIGNATURES: Record<`0x${string}`, string> = {
+  '0x5566df5c': 'InvalidBeneficiary()',
 };
 
 // DCA_SWAP_SELECTOR, DCA_ALWAYS_STRICT_SPENDERS, DCA_SWAP_ABI and all DCA calldata
@@ -448,6 +453,27 @@ function extractRevertedContractAddressFromSimulationError(errorMessage: string)
   return match[1].toLowerCase() as `0x${string}`;
 }
 
+function extractUnknownRevertSignature(errorMessage: string): `0x${string}` | null {
+  const match = errorMessage.match(/reverted with the following signature:\s*(0x[a-fA-F0-9]{8})/i);
+  if (!match) {
+    return null;
+  }
+
+  return match[1].toLowerCase() as `0x${string}`;
+}
+
+function hasUnknownRevertSignatureDecodeFailure(errorMessage: string): boolean {
+  const normalized = normalizeErrorMessage(errorMessage);
+  return (
+    normalized.includes('unable to decode signature') &&
+    normalized.includes('not found on the provided abi')
+  );
+}
+
+function resolveKnownCustomErrorName(signature: `0x${string}`): string | null {
+  return KNOWN_DOWNSTREAM_CUSTOM_ERROR_SIGNATURES[signature] ?? null;
+}
+
 // resolveDcaAllowanceSpenderAddress, getDcaAllowanceSpenderCandidates,
 // getDcaAlwaysStrictDecodedSpenders, and getDcaStrictRequiredSpenders are
 // imported from '../domain/dcaCalldata' (shared module).
@@ -656,7 +682,13 @@ async function getGuardrailOwnerAddress(): Promise<`0x${string}`> {
 async function getSessionPermissionSnapshot(
   userAddress: `0x${string}`,
   sessionKeyAddress: `0x${string}`
-): Promise<{ maxUsdcSpendLimit: bigint; currentUsdcSpent: bigint } | null> {
+): Promise<{
+  validUntil: bigint;
+  maxUsdcSpendLimit: bigint;
+  currentUsdcSpent: bigint;
+  revoked: boolean;
+  exists: boolean;
+} | null> {
   try {
     const permission = (await withRpcRateLimitHandling(() =>
       withRpcReadFailover('getSessionPermission', async (client) =>
@@ -667,12 +699,43 @@ async function getSessionPermissionSnapshot(
           args: [userAddress, sessionKeyAddress],
         })
       )
-    )) as { maxUsdcSpendLimit: bigint; currentUsdcSpent: bigint };
+    )) as {
+      validUntil: bigint;
+      maxUsdcSpendLimit: bigint;
+      currentUsdcSpent: bigint;
+      revoked: boolean;
+      exists: boolean;
+    };
 
     return {
+      validUntil: BigInt(permission.validUntil),
       maxUsdcSpendLimit: BigInt(permission.maxUsdcSpendLimit),
       currentUsdcSpent: BigInt(permission.currentUsdcSpent),
+      revoked: Boolean(permission.revoked),
+      exists: Boolean(permission.exists),
     };
+  } catch {
+    return null;
+  }
+}
+
+async function isSessionKeyValidForUser(
+  userAddress: `0x${string}`,
+  sessionKeyAddress: `0x${string}`
+): Promise<boolean | null> {
+  try {
+    const isValid = (await withRpcRateLimitHandling(() =>
+      withRpcReadFailover('isValidSessionKey', async (client) =>
+        client.readContract({
+          address: CONTRACT_ADDRESSES.sessionKeyRegistry,
+          abi: SESSION_KEY_REGISTRY_ABI,
+          functionName: 'isValidSessionKey',
+          args: [userAddress, sessionKeyAddress],
+        })
+      )
+    )) as boolean;
+
+    return Boolean(isValid);
   } catch {
     return null;
   }
@@ -1008,6 +1071,7 @@ export async function pollAndTriggerActiveRecipes() {
           try {
             const routePlan = await dcaSwapRouteClient.resolveRoute({
               recipientAddress: recipe.userAddress as `0x${string}`,
+              sourceAddress: CONTRACT_ADDRESSES.sharedExecutorProxy,
               amountInBaseUnits: dcaExecutionAmount,
               maxSlippageBps,
               targetAssetSymbol,
@@ -1192,6 +1256,30 @@ export async function pollAndTriggerActiveRecipes() {
           continue;
         }
 
+        const sessionKeyValid = await isSessionKeyValidForUser(
+          recipe.userAddress as `0x${string}`,
+          keeperAccount.address
+        );
+        if (sessionKeyValid === false) {
+          const keeperHintKey = `${recipe.userAddress.toLowerCase()}:${keeperAccount.address.toLowerCase()}`;
+          if (!unauthorizedKeeperHintsLogged.has(keeperHintKey)) {
+            const permission = await getSessionPermissionSnapshot(
+              recipe.userAddress as `0x${string}`,
+              keeperAccount.address
+            );
+            console.warn(
+              `[Cron Scheduler Action Required] Keeper session key is not valid for this user. ` +
+              `exists=${permission?.exists ?? 'unknown'} revoked=${permission?.revoked ?? 'unknown'} ` +
+              `validUntilUnix=${permission?.validUntil.toString() ?? 'unknown'} ` +
+              `maxUsdcSpendLimitBaseUnits=${permission?.maxUsdcSpendLimit.toString() ?? 'unknown'} ` +
+              `currentUsdcSpentBaseUnits=${permission?.currentUsdcSpent.toString() ?? 'unknown'}. ` +
+              `From user ${recipe.userAddress}, call registerSessionKey(${keeperAccount.address}, validUntilUnixTimestamp, maxUsdcSpendLimitBaseUnits) on SessionKeyRegistry ${CONTRACT_ADDRESSES.sessionKeyRegistry}.`
+            );
+            unauthorizedKeeperHintsLogged.add(keeperHintKey);
+          }
+          continue;
+        }
+
         // Pre-flight static simulation via eth_call
         const simResult = await simulateRecipeStep(
           {
@@ -1221,8 +1309,16 @@ export async function pollAndTriggerActiveRecipes() {
           if (isUnauthorizedKeeperError(simulationError)) {
             const keeperHintKey = `${recipe.userAddress.toLowerCase()}:${keeperAccount.address.toLowerCase()}`;
             if (!unauthorizedKeeperHintsLogged.has(keeperHintKey)) {
+              const permission = await getSessionPermissionSnapshot(
+                recipe.userAddress as `0x${string}`,
+                keeperAccount.address
+              );
               console.warn(
                 `[Cron Scheduler Action Required] Keeper session key is not valid for this user. ` +
+                `exists=${permission?.exists ?? 'unknown'} revoked=${permission?.revoked ?? 'unknown'} ` +
+                `validUntilUnix=${permission?.validUntil.toString() ?? 'unknown'} ` +
+                `maxUsdcSpendLimitBaseUnits=${permission?.maxUsdcSpendLimit.toString() ?? 'unknown'} ` +
+                `currentUsdcSpentBaseUnits=${permission?.currentUsdcSpent.toString() ?? 'unknown'}. ` +
                 `From user ${recipe.userAddress}, call registerSessionKey(${keeperAccount.address}, validUntilUnixTimestamp, maxUsdcSpendLimitBaseUnits) on SessionKeyRegistry ${CONTRACT_ADDRESSES.sessionKeyRegistry}.`
               );
               unauthorizedKeeperHintsLogged.add(keeperHintKey);
@@ -1354,6 +1450,25 @@ export async function pollAndTriggerActiveRecipes() {
             );
           }
 
+          const unknownRevertSignature = extractUnknownRevertSignature(simulationError);
+          if (unknownRevertSignature && hasUnknownRevertSignatureDecodeFailure(simulationError)) {
+            const signatureHintKey = `${recipe.id}:${targetProtocol.toLowerCase()}:${unknownRevertSignature}`;
+            if (!unknownRevertSignatureHintsLogged.has(signatureHintKey)) {
+              const revertedContractAddress = extractRevertedContractAddressFromSimulationError(simulationError);
+              const knownCustomErrorName = resolveKnownCustomErrorName(unknownRevertSignature);
+              console.warn(
+                `[Cron Scheduler Action Required] Simulation reverted with unknown custom error signature ${context}. ` +
+                `signature=${unknownRevertSignature} targetProtocol=${targetProtocol} ` +
+                `decodedSignature=${knownCustomErrorName || 'unknown'} ` +
+                `revertedContractAddress=${revertedContractAddress || 'unknown'} ` +
+                `lookup=https://4byte.sourcify.dev/?q=${unknownRevertSignature}. ` +
+                `This usually means a downstream protocol reverted with a custom error not present in SharedExecutor ABI. ` +
+                `Refresh route/callData, confirm route contract compatibility, then retry simulation.`
+              );
+              unknownRevertSignatureHintsLogged.add(signatureHintKey);
+            }
+          }
+
           console.warn(`[Cron Scheduler Notice] Simulation failed ${context}: ${simResult.errorMessage}. Skipping enqueue.`);
           continue;
         }
@@ -1476,6 +1591,7 @@ export function __resetCronSchedulerStateForTests() {
   userExecutionPausedHintsLogged.clear();
   allowanceExceededHintsLogged.clear();
   balanceExceededHintsLogged.clear();
+  unknownRevertSignatureHintsLogged.clear();
   allowancePrecheckHintsLogged.clear();
   unsupportedDcaModeHintsLogged.clear();
   exceededSpendLimitHintsLogged.clear();

@@ -18,13 +18,9 @@ export type ExecuteResult = {
 };
 
 // Resolve chain from env — default Arc_Testnet.
-// USDC↔EURC swaps are only available on Arc mainnet (LiFi has no testnet route).
 const envChain = process.env.NEXT_PUBLIC_ARC_CHAIN ?? 'Arc_Testnet';
 export const SWAP_CHAIN: SwapChain =
   (SwapChain as Record<string, SwapChain>)[envChain] ?? SwapChain.Arc_Testnet;
-
-/** True when on testnet — USDC↔EURC routes are unavailable. */
-export const SWAP_REQUIRES_MAINNET = SWAP_CHAIN === SwapChain.Arc_Testnet;
 
 export async function estimateSwap({
   tokenIn,
@@ -37,12 +33,6 @@ export async function estimateSwap({
   amountIn: string;
   connector?: Connector;
 }): Promise<QuoteResult> {
-  if (SWAP_REQUIRES_MAINNET) {
-    throw new Error(
-      'USDC ↔ EURC swaps are not available on Arc Testnet — the liquidity provider has no testnet route. Set NEXT_PUBLIC_ARC_CHAIN=Arc to use mainnet.'
-    );
-  }
-
   const adapter = await getBrowserAdapter(connector);
   const result = await getAppKit().estimateSwap({
     from: { adapter, chain: SWAP_CHAIN },
@@ -78,12 +68,6 @@ export async function executeSwap({
   appFeeRecipient: string;
   connector?: Connector;
 }): Promise<ExecuteResult> {
-  if (SWAP_REQUIRES_MAINNET) {
-    throw new Error(
-      'USDC ↔ EURC swaps are not available on Arc Testnet. Set NEXT_PUBLIC_ARC_CHAIN=Arc to use mainnet.'
-    );
-  }
-
   const adapter = await getBrowserAdapter(connector);
 
   const feeConfig =

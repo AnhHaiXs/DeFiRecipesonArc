@@ -16,6 +16,7 @@ import {
 
 interface DcaSwapRouteRequest {
   recipientAddress: `0x${string}`;
+  sourceAddress?: `0x${string}`;
   amountInBaseUnits: bigint;
   maxSlippageBps: number;
   targetAssetSymbol: string;
@@ -419,11 +420,14 @@ class AppKitDcaSwapRouteClient implements DcaSwapRouteClient {
       headers.Authorization = `Bearer ${apiKey}`;
     }
 
-    // IMPORTANT: fromAddress must be ARC_SWAP_ADAPTER_ADDRESS, not the user wallet.
+    // IMPORTANT: fromAddress must be the real execution source that submits adapter.execute()
+    // on-chain (SharedExecutorProxy in keeper flow), not the end user wallet.
+    // When omitted, we fall back to ARC_SWAP_ADAPTER_ADDRESS for backward compatibility.
+    const sourceAddress = request.sourceAddress ?? ARC_SWAP_ADAPTER_ADDRESS;
+
     // Circle Stablecoin Service generates signed executionParams for the adapter contract
-    // to execute on-chain. If fromAddress = user wallet, the service returns 331001
-    // "No route available" because it cannot find a route from a regular EOA.
-    // The adapter is the actual msg.sender for the swap; toAddress receives the output tokens.
+    // to execute on-chain. Using user EOA as source frequently yields no-route responses;
+    // using an incorrect source can also produce signed params that fail beneficiary checks.
     const response = await fetch(endpoint, {
       method: 'POST',
       headers,
@@ -432,7 +436,7 @@ class AppKitDcaSwapRouteClient implements DcaSwapRouteClient {
         tokenInChain: 'Arc_Testnet',
         tokenOutAddress: this.getTokenOutAddress(request.targetAssetSymbol),
         tokenOutChain: 'Arc_Testnet',
-        fromAddress: ARC_SWAP_ADAPTER_ADDRESS,
+        fromAddress: sourceAddress,
         toAddress: request.recipientAddress,
         amount: request.amountInBaseUnits.toString(),
         slippageBps: request.maxSlippageBps,
@@ -674,7 +678,7 @@ class LiFiArcDcaSwapRouteClient implements DcaSwapRouteClient {
       fromToken: ARC_USDC_ADDRESS,
       toToken: this.getTokenOutAddress(request.targetAssetSymbol),
       fromAmount: request.amountInBaseUnits.toString(),
-      fromAddress: request.recipientAddress,
+      fromAddress: request.sourceAddress ?? request.recipientAddress,
       toAddress: request.recipientAddress,
       slippage: request.maxSlippageBps / 10_000,
     };
@@ -825,13 +829,14 @@ class LiFiDirectDcaSwapRouteClient implements DcaSwapRouteClient {
   }
 
   private buildQuoteUrl(request: DcaSwapRouteRequest): string {
+    const sourceAddress = request.sourceAddress ?? request.recipientAddress;
     const params = new URLSearchParams({
       fromChain: ARC_TESTNET_CHAIN_ID.toString(),
       toChain: ARC_TESTNET_CHAIN_ID.toString(),
       fromToken: ARC_USDC_ADDRESS,
       toToken: this.getTokenOutAddress(request.targetAssetSymbol),
       fromAmount: request.amountInBaseUnits.toString(),
-      fromAddress: request.recipientAddress,
+      fromAddress: sourceAddress,
       toAddress: request.recipientAddress,
       // LI.FI uses decimal slippage (0.005 = 0.5%), not bps
       slippage: (request.maxSlippageBps / 10_000).toString(),
@@ -1135,7 +1140,8 @@ class CurveDirectDcaSwapRouteClient implements DcaSwapRouteClient {
 // CircleStablecoinDirectClient
 //
 // Gọi Circle Stablecoin Service (/v1/stablecoinKits/swap) trực tiếp với:
-//   1. fromAddress = ARC_SWAP_ADAPTER_ADDRESS (required — user EOA returns 331001)
+//   1. fromAddress = execution source address (SharedExecutorProxy in keeper flow)
+//      fallback to ARC_SWAP_ADAPTER_ADDRESS for backward compatibility
 //   2. Retry exponential backoff + jitter (Circle service là intermittent ~40% fail)
 //   3. On-chain Curve get_dy() làm minOut fallback khi stopLimit absent
 //
@@ -1253,8 +1259,9 @@ class CircleStablecoinDirectClient implements DcaSwapRouteClient {
       tokenInChain: 'Arc_Testnet',
       tokenOutAddress: this.getTokenOutAddress(request.targetAssetSymbol),
       tokenOutChain: 'Arc_Testnet',
-      // fromAddress MUST be ArcSwapAdapter — user EOA causes 331001 "No route available"
-      fromAddress: ARC_SWAP_ADAPTER_ADDRESS,
+      // fromAddress must match the real execution source in adapter.execute() flow.
+      // Fall back to adapter address when source is not provided.
+      fromAddress: request.sourceAddress ?? ARC_SWAP_ADAPTER_ADDRESS,
       toAddress: request.recipientAddress,
       amount: request.amountInBaseUnits.toString(),
       slippageBps: request.maxSlippageBps,

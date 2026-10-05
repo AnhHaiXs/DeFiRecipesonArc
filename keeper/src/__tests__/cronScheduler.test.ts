@@ -142,6 +142,45 @@ describe('Cron Scheduler Recipe Triggering', () => {
     warnSpy.mockRestore();
   });
 
+  it('skips simulation early when session key is invalid for the user', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    findByStatusMock.mockResolvedValue([
+      makeActiveRecipe({
+        id: 'unauthorized-keeper-precheck',
+        recipeType: RecipeType.RECURRING_DCA,
+        swapProvider: 'ARC_APP_KIT_SWAP',
+        parametersJson: { totalBudgetUsdc: '100', perExecutionAmountUsdc: '5', mode: 'PULL' },
+      }),
+    ]);
+
+    readContractMock.mockImplementation(async (request: Record<string, unknown>) => {
+      const functionName = request.functionName as string;
+      if (functionName === 'balanceOf' || functionName === 'allowance') {
+        return 5000000n;
+      }
+      if (functionName === 'isValidSessionKey') {
+        return false;
+      }
+      return true;
+    });
+
+    await pollAndTriggerActiveRecipes();
+    await pollAndTriggerActiveRecipes();
+
+    expect(simulateRecipeStepMock).not.toHaveBeenCalled();
+    expect(queueAddMock).not.toHaveBeenCalled();
+
+    const actionRequiredWarnings = warnSpy.mock.calls
+      .flatMap((call) => call)
+      .filter(
+        (value) =>
+          typeof value === 'string' && value.includes('Keeper session key is not valid for this user')
+      );
+    expect(actionRequiredWarnings).toHaveLength(1);
+
+    warnSpy.mockRestore();
+  });
+
   it('logs actionable hint once and skips enqueue when the user pauses recipe execution', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     findByStatusMock.mockResolvedValue([
@@ -188,6 +227,7 @@ describe('Cron Scheduler Recipe Triggering', () => {
     expect(dcaResolveRouteMock).toHaveBeenCalledTimes(1);
     expect(dcaResolveRouteMock).toHaveBeenCalledWith(
       expect.objectContaining({
+        sourceAddress: '0xcbd2de404cb02c45b8688883e4321f887a6f2fc2',
         amountInBaseUnits: 50000000n,
         maxSlippageBps: 100,
         targetAssetSymbol: 'EURC',
@@ -248,6 +288,7 @@ describe('Cron Scheduler Recipe Triggering', () => {
     expect(dcaResolveRouteMock).toHaveBeenCalledTimes(1);
     expect(dcaResolveRouteMock).toHaveBeenCalledWith(
       expect.objectContaining({
+        sourceAddress: '0xcbd2de404cb02c45b8688883e4321f887a6f2fc2',
         amountInBaseUnits: 50000000n,
         maxSlippageBps: 250,
         targetAssetSymbol: 'EURC',
@@ -575,6 +616,51 @@ describe('Cron Scheduler Recipe Triggering', () => {
     expect(balanceWarnings).toHaveLength(1);
     expect(balanceWarnings[0]).toContain('targetProtocol=0xf992efcb5fa2ed7cb48310d9dd8cb4ce5fb7ddc9');
     expect(balanceWarnings[0]).toContain('selector=0x12345678');
+
+    warnSpy.mockRestore();
+  });
+
+  it('logs unknown custom error signature hint once when simulation revert selector is not in ABI', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    findByStatusMock.mockResolvedValue([
+      makeActiveRecipe({
+        id: 'dca-unknown-revert-signature',
+        recipeType: RecipeType.RECURRING_DCA,
+        swapProvider: 'ARC_APP_KIT_SWAP',
+        parametersJson: { totalBudgetUsdc: '100', perExecutionAmountUsdc: '5', mode: 'PULL', maxSlippageBps: 100, targetAssetSymbol: 'EURC' },
+      }),
+    ]);
+
+    simulateRecipeStepMock.mockResolvedValue({
+      success: false,
+      errorMessage:
+        'The contract function "executeRecipeStep" reverted with the following signature:\n' +
+        '0x5566df5c\n\n' +
+        'Unable to decode signature "0x5566df5c" as it was not found on the provided ABI.\n' +
+        'Contract Call:\n' +
+        'address:   0x7A3e5F10c2C1E5F701d4a7E02dec84654F12C774\n' +
+        'function:  executeRecipeStep(address user, address targetProtocol, bytes callData, uint256 minAmountOut)\n' +
+        'Details: execution reverted',
+    });
+
+    await pollAndTriggerActiveRecipes();
+    await pollAndTriggerActiveRecipes();
+
+    expect(queueAddMock).not.toHaveBeenCalled();
+
+    const signatureWarnings = warnSpy.mock.calls
+      .flatMap((call) => call)
+      .filter(
+        (value) =>
+          typeof value === 'string' &&
+          value.includes('Simulation reverted with unknown custom error signature')
+      ) as string[];
+
+    expect(signatureWarnings).toHaveLength(1);
+    expect(signatureWarnings[0]).toContain('signature=0x5566df5c');
+    expect(signatureWarnings[0]).toContain('decodedSignature=InvalidBeneficiary()');
+    expect(signatureWarnings[0]).toContain('lookup=https://4byte.sourcify.dev/?q=0x5566df5c');
 
     warnSpy.mockRestore();
   });

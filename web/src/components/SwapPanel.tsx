@@ -6,7 +6,7 @@ import { formatUnits } from 'viem';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useAccount, useBalance } from 'wagmi';
 import { CONTRACT_ADDRESSES } from '@/config/contracts';
-import { estimateSwap, executeSwap, SWAP_REQUIRES_MAINNET } from '@/lib/appkit/swap-client';
+import { estimateSwap, executeSwap } from '@/lib/appkit/swap-client';
 import { useLanguage } from '@/lib/i18n/LanguageProvider';
 
 type FxToken = 'USDC' | 'EURC';
@@ -243,15 +243,6 @@ export function SwapPanel() {
 
   return (
     <section className="glass-card p-5 sm:p-6">
-      {SWAP_REQUIRES_MAINNET ? (
-        <div className="mb-4 flex items-start gap-2.5 rounded-xl border px-4 py-3 text-sm" style={{ borderColor: 'rgba(242,153,74,0.30)', background: 'var(--warning-bg)', color: 'var(--warning)' }}>
-          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>
-            USDC ↔ EURC swaps require <strong>Arc mainnet</strong> — the liquidity provider has no testnet route.
-            Set <code className="rounded px-1 text-xs" style={{ background: 'rgba(242,153,74,0.15)' }}>NEXT_PUBLIC_ARC_CHAIN=Arc</code> to enable.
-          </span>
-        </div>
-      ) : null}
       <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-[0.22em] text-slate-400">{t('swapPanelEyebrow')}</p>
