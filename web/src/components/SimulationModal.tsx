@@ -477,15 +477,17 @@ export const SimulationModal: React.FC<SimulationModalProps> = ({
                                 {allowanceCheck.requiredSpenders.map((spender) => {
                                   const current = BigInt(allowanceCheck.allowanceBySpender?.[spender.toLowerCase()] || '0');
                                   const required = BigInt(allowanceCheck.requiredForSchedulerBaseUnits || '0');
-                                  const isEnough = current >= required;
+                                  const isUnlimited = current >= maxUint256 / 2n;
+                                  const isEnough = isUnlimited || current >= required;
                                   const isThisApproving = approvingSpender === spender.toLowerCase();
                                   const wasApproved = approvedSpenders.has(spender.toLowerCase());
+                                  const displayCurrent = isUnlimited ? 'Unlimited' : `${formatUsdcBaseUnits(current.toString())} USDC`;
                                   return (
                                     <div key={spender} className="flex items-center justify-between gap-2 rounded-lg border border-slate-700/60 bg-slate-900/60 px-2.5 py-1.5">
                                       <div className="min-w-0 flex-1">
                                         <div className="truncate font-mono text-[10px] text-slate-400">{spender}</div>
                                         <div className={`text-[11px] font-medium ${isEnough || wasApproved ? 'text-emerald-300' : 'text-amber-300'}`}>
-                                          {formatUsdcBaseUnits(current.toString())} / {formatUsdcBaseUnits(required.toString())} USDC
+                                          {displayCurrent} / {formatUsdcBaseUnits(required.toString())} USDC
                                           {(isEnough || wasApproved) ? ' ✓' : ' — needs approval'}
                                         </div>
                                       </div>
