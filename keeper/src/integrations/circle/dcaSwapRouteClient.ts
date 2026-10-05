@@ -3,6 +3,7 @@ import {
   ARC_EURC_ADDRESS,
   ARC_SWAP_ADAPTER_ADDRESS,
   ARC_USDC_ADDRESS,
+  LIFI_FLY_DEX_ROUTER_ARC_TESTNET,
 } from '../../config/dcaRouting';
 import { arcTestnet } from 'viem/chains';
 import {
@@ -486,7 +487,7 @@ function readOptionalModuleFunction<T>(module: unknown, exportName: string): T |
   }
 }
 
-function normalizeRuntimeProvider(value: string | undefined): 'ARC_LIFI_SWAP' | 'ARC_APP_KIT_SWAP' {
+function normalizeRuntimeProvider(value: string | undefined): 'ARC_LIFI_SWAP' | 'ARC_APP_KIT_SWAP' | 'LIFI_DIRECT' {
   const normalized = value?.trim().toUpperCase();
   if (!normalized || ['ARC_LIFI_SWAP', 'LIFI_SWAP', 'LIFI'].includes(normalized)) {
     return 'ARC_LIFI_SWAP';
@@ -496,8 +497,12 @@ function normalizeRuntimeProvider(value: string | undefined): 'ARC_LIFI_SWAP' | 
     return 'ARC_APP_KIT_SWAP';
   }
 
+  if (['LIFI_DIRECT', 'LIFI_REST', 'LIFI_API'].includes(normalized)) {
+    return 'LIFI_DIRECT';
+  }
+
   throw new Error(
-    `Unsupported DCA_ROUTE_PROVIDER=${value}. Supported values: ARC_LIFI_SWAP (aliases: LIFI_SWAP, LIFI), ARC_APP_KIT_SWAP (aliases: APP_KIT_SWAP, APP_KIT).`
+    `Unsupported DCA_ROUTE_PROVIDER=${value}. Supported values: ARC_LIFI_SWAP (aliases: LIFI_SWAP, LIFI), ARC_APP_KIT_SWAP (aliases: APP_KIT_SWAP, APP_KIT), LIFI_DIRECT (aliases: LIFI_REST, LIFI_API).`
   );
 }
 
@@ -728,6 +733,189 @@ class LiFiArcDcaSwapRouteClient implements DcaSwapRouteClient {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phương án B: LI.FI REST API trực tiếp (không dùng @lifi/sdk)
+//
+// LI.FI GET /v1/quote trả về transactionRequest.{to, data} sẵn sàng submit.
+// Verified live 2026-10-05: USDC→EURC trên Arc Testnet (chainId=5042002)
+// qua Fly DEX router 0xFf70F4A1d11995621854F3692acF286d8aCd04b2.
+//
+// Env vars:
+//   LIFI_API_BASE_URL  — default https://li.quest (optional override)
+//   LIFI_API_KEY       — optional; nếu có sẽ được gửi qua x-lifi-api-key header
+//   LIFI_INTEGRATOR    — default "defirecipes" (max 23 chars alphanumeric._-)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface LiFiQuoteResponse {
+  tool: string;
+  transactionRequest: {
+    to: string;
+    data: string;
+    value: string;
+    gasPrice?: string;
+    gasLimit?: string;
+    chainId?: number;
+  };
+  estimate: {
+    approvalAddress: string;
+    toAmount: string;
+    toAmountMin: string;
+    fromAmount: string;
+  };
+}
+
+function isLiFiQuoteResponse(value: unknown): value is LiFiQuoteResponse {
+  if (!isRecord(value)) return false;
+  const tx = value.transactionRequest;
+  if (!isRecord(tx)) return false;
+  const est = value.estimate;
+  if (!isRecord(est)) return false;
+  return (
+    typeof tx.to === 'string' &&
+    typeof tx.data === 'string' &&
+    typeof est.approvalAddress === 'string' &&
+    typeof est.toAmountMin === 'string'
+  );
+}
+
+class LiFiDirectDcaSwapRouteClient implements DcaSwapRouteClient {
+  private readonly baseUrl: string;
+  private readonly apiKey: string | undefined;
+  private readonly integrator: string;
+
+  constructor() {
+    const rawBase = process.env.LIFI_API_BASE_URL?.trim();
+    this.baseUrl = rawBase && rawBase.length > 0 ? rawBase.replace(/\/$/, '') : 'https://li.quest';
+    this.apiKey = process.env.LIFI_API_KEY?.trim() || undefined;
+    this.integrator = normalizeLiFiIntegrator(process.env.LIFI_INTEGRATOR);
+  }
+
+  private getTokenOutAddress(targetAssetSymbol: string): `0x${string}` {
+    if (targetAssetSymbol === 'EURC') return ARC_EURC_ADDRESS;
+    if (targetAssetSymbol === 'cirBTC') return ARC_CIRBTC_ADDRESS;
+    throw new Error(`Unsupported targetAssetSymbol=${targetAssetSymbol} for LI.FI Direct DCA.`);
+  }
+
+  private buildQuoteUrl(request: DcaSwapRouteRequest): string {
+    const params = new URLSearchParams({
+      fromChain: ARC_TESTNET_CHAIN_ID.toString(),
+      toChain: ARC_TESTNET_CHAIN_ID.toString(),
+      fromToken: ARC_USDC_ADDRESS,
+      toToken: this.getTokenOutAddress(request.targetAssetSymbol),
+      fromAmount: request.amountInBaseUnits.toString(),
+      fromAddress: request.recipientAddress,
+      toAddress: request.recipientAddress,
+      // LI.FI uses decimal slippage (0.005 = 0.5%), not bps
+      slippage: (request.maxSlippageBps / 10_000).toString(),
+      integrator: this.integrator,
+      // Disable bridge routes — only on-chain Fly DEX swap needed
+      allowBridges: '',
+      allowExchanges: 'fly',
+    });
+    return `${this.baseUrl}/v1/quote?${params.toString()}`;
+  }
+
+  async resolveRoute(request: DcaSwapRouteRequest): Promise<DcaSwapExecutionPlan> {
+    const url = this.buildQuoteUrl(request);
+
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+    };
+    if (this.apiKey) {
+      headers['x-lifi-api-key'] = this.apiKey;
+    }
+
+    let rawBody: string;
+    let httpStatus: number;
+
+    try {
+      const response = await fetch(url, { method: 'GET', headers });
+      httpStatus = response.status;
+      rawBody = await response.text();
+
+      if (!response.ok) {
+        // Normalise LI.FI error body — may be JSON {message, code} or plain text
+        let detail = rawBody;
+        try {
+          const errJson = JSON.parse(rawBody) as Record<string, unknown>;
+          if (typeof errJson.message === 'string') {
+            detail = errJson.message;
+          }
+        } catch {
+          /* keep rawBody */
+        }
+
+        if (httpStatus === 404 || isLiFiNoRouteError(detail)) {
+          throw new Error('LI.FI Direct: no route available for this DCA swap request.');
+        }
+        if (httpStatus === 429 || isLiFiRateLimitError(detail)) {
+          throw new Error(
+            'LI.FI Direct: rate limit exceeded (HTTP 429). Set LIFI_API_KEY for higher quota.'
+          );
+        }
+        throw new Error(`LI.FI Direct: HTTP ${httpStatus} — ${detail}`);
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      // Re-throw already-normalised errors from the block above
+      if (message.startsWith('LI.FI Direct:')) throw error;
+      throw new Error(`LI.FI Direct: fetch failed — ${message}`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new Error('LI.FI Direct: response is not valid JSON.');
+    }
+
+    if (!isLiFiQuoteResponse(parsed)) {
+      throw new Error(
+        'LI.FI Direct: quote response is missing transactionRequest or estimate fields.'
+      );
+    }
+
+    const txTo = normalizeHexAddress(parsed.transactionRequest.to);
+    const txData = normalizeHexData(parsed.transactionRequest.data);
+
+    if (!txTo) {
+      throw new Error(
+        `LI.FI Direct: transactionRequest.to is not a valid address: ${parsed.transactionRequest.to}`
+      );
+    }
+    if (!txData) {
+      throw new Error(
+        `LI.FI Direct: transactionRequest.data is not valid hex calldata.`
+      );
+    }
+
+    // approvalAddress is the spender the user must approve before submitting the tx
+    const spenderAddress = normalizeHexAddress(parsed.estimate.approvalAddress) ?? txTo;
+
+    // toAmountMin is already slippage-adjusted by LI.FI
+    const minOut = parseBigIntFromUnknown(parsed.estimate.toAmountMin);
+    const minSwapAssetOutBaseUnits =
+      minOut !== null && minOut > 0n
+        ? minOut
+        : fallbackMinOutFromInput(request.amountInBaseUnits, request.maxSlippageBps);
+
+    console.log(
+      `[LI.FI Direct] Quote resolved tool=${parsed.tool} ` +
+      `from=USDC to=${request.targetAssetSymbol} ` +
+      `amountIn=${request.amountInBaseUnits.toString()} ` +
+      `toAmountMin=${minSwapAssetOutBaseUnits.toString()} ` +
+      `router=${txTo} spender=${spenderAddress}`
+    );
+
+    return {
+      targetProtocolAddress: txTo,
+      callData: txData,
+      minSwapAssetOutBaseUnits,
+      spenderAddress,
+    };
+  }
+}
+
 function createAppKitDcaSwapRouteClient(): DcaSwapRouteClient {
   return new AppKitDcaSwapRouteClient();
 }
@@ -739,6 +927,11 @@ export function createDcaSwapRouteClientFromRuntime(): DcaSwapRouteClient {
     return createAppKitDcaSwapRouteClient();
   }
 
+  if (provider === 'LIFI_DIRECT') {
+    return new LiFiDirectDcaSwapRouteClient();
+  }
+
+  // Default: ARC_LIFI_SWAP (SDK-based) with App Kit fallback
   const appKitFallbackClient = createAppKitDcaSwapRouteClient();
   return new LiFiArcDcaSwapRouteClient(appKitFallbackClient);
 }

@@ -10,6 +10,11 @@ export const ARC_APP_KIT_DCA_USDC_SPENDER = '0xf992efcb5fa2ed7cb48310d9dd8cb4ce5
 export const ARC_SWAP_ADAPTER_ADDRESS = '0xbbd70b01a1cabc96d5b7b129ae1aaabdf50dd40b' as const;
 export const ARC_SWAP_ADAPTER_EXECUTE_SELECTOR = '0xaa3e079c' as const;
 
+// LI.FI Fly DEX router on Arc Testnet (chainId=5042002).
+// Verified live: GET /v1/quote returns transactionRequest.to = approvalAddress = this address.
+// Source: li.quest/v1/quote?fromChain=5042002&toChain=5042002&fromToken=USDC&toToken=EURC
+export const LIFI_FLY_DEX_ROUTER_ARC_TESTNET = '0xff70f4a1d11995621854f3692acf286d8acd04b2' as const;
+
 
 export const ARC_TESTNET_SUPPORTED_TOKENS = ['USDC', 'EURC', 'cirBTC'] as const;
 export type ArcTestnetTokenSymbol = (typeof ARC_TESTNET_SUPPORTED_TOKENS)[number];
