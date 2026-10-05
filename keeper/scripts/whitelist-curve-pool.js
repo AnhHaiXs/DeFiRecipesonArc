@@ -1,114 +1,117 @@
 #!/usr/bin/env node
 /**
- * Whitelist Curve USDC/EURC pool trên RecipeGuardrail contract.
+ * whitelist-curve-pool.js
  *
- * Verified on-chain 2026-10-05:
- *   - pool 0x311d3f55 là pool THỰC SỰ được FlyDEX dùng trong swap txn
- *   - setWhitelisted selector: 0x2a683795
- *   - owner: 0xecd06d7a0191f74b9c1fe007e02ed0b8ef32e866
+ * Whitelist Curve USDC/EURC pool (0x311d3f55...) trên RecipeGuardrail contract.
  *
- * Usage:
- *   OWNER_PRIVATE_KEY=0x<your_key> node keeper/scripts/whitelist-curve-pool.js
+ * Pool đúng được xác nhận từ txn 0x8f1d2b11... (swap thực tế trên Arc Testnet).
+ * Selector: 0xdc6b8812 = addWhitelist(address) — chỉ cần address, không cần bool.
  *
- * KHÔNG commit file này với private key. Chỉ dùng env var.
+ * Chạy:
+ *   OWNER_PRIVATE_KEY=0x<key> node keeper/scripts/whitelist-curve-pool.js
+ *
+ * Yêu cầu: owner wallet = 0xecd06d7a0191f74b9c1fe007e02ed0b8ef32e866
  */
 
-const RPC = process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network/';
-const GUARDRAIL = '0xB9b1C570fa0F633bc5cc0B833078d749f108748d';
-const CURVE_POOL = '0x311d3f5530245b839dae6cf91685ae64c605e956';
-const CHAIN_ID = 5042002; // Arc Testnet
+import { createPublicClient, createWalletClient, http, defineChain } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 
-const PRIVATE_KEY = process.env.OWNER_PRIVATE_KEY;
-if (!PRIVATE_KEY) {
-  console.error('❌  Set OWNER_PRIVATE_KEY=0x<your_key> trước khi chạy');
-  process.exit(1);
+const arcTestnet = defineChain({
+  id: 5042002,
+  name: 'Arc Testnet',
+  nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
+  rpcUrls: {
+    default: { http: ['https://rpc.testnet.arc.network/'] },
+    public:  { http: ['https://rpc.testnet.arc.io/'] },
+  },
+});
+
+const GUARDRAIL = '0xB9b1C570fa0F633bc5cc0B833078d749f108748d';
+
+// Pool đúng — verified từ txn 0x8f1d2b11... (swap thực tế 2026-10-05)
+// get_dy(0,1,1_000_000) = 1.002072 EURC per USDC (healthy pool)
+const CURVE_POOL = '0x311d3f5530245b839dae6cf91685ae64c605e956';
+
+// Selectors đã xác nhận từ bytecode analysis:
+// 0xdc6b8812 = addWhitelist(address)   — thêm vào whitelist
+// 0x9387bbd4 = isWhitelisted(address)  — đọc trạng thái
+const ADD_WHITELIST_SELECTOR = '0xdc6b8812';
+const IS_WHITELISTED_SELECTOR = '0x9387bbd4';
+
+const RPC = 'https://rpc.testnet.arc.network/';
+
+function padAddress(addr) {
+  return '000000000000000000000000' + addr.slice(2).toLowerCase();
 }
 
-// ─── Minimal viem-free tx signer (chỉ dùng Node built-ins + secp256k1 nếu có) ───
-// Dùng viem nếu có sẵn trong node_modules
+async function isWhitelisted(publicClient, address) {
+  const data = (IS_WHITELISTED_SELECTOR + padAddress(address));
+  const result = await publicClient.call({
+    to: GUARDRAIL,
+    data: data,
+  });
+  const hex = result.data;
+  return hex === ('0x' + '0'.repeat(63) + '1');
+}
+
 async function main() {
-  let createWalletClient, http, publicActions;
-  try {
-    const viem = await import('viem');
-    const viemChains = await import('viem/chains');
-    const accounts = await import('viem/accounts');
+  const pk = process.env.OWNER_PRIVATE_KEY;
+  if (!pk) {
+    console.error('❌ OWNER_PRIVATE_KEY env var required');
+    console.error('   Usage: OWNER_PRIVATE_KEY=0x<key> node keeper/scripts/whitelist-curve-pool.js');
+    process.exit(1);
+  }
 
-    const arcTestnet = {
-      id: CHAIN_ID,
-      name: 'Arc Testnet',
-      nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
-      rpcUrls: { default: { http: [RPC] } },
-    };
+  const account = privateKeyToAccount(pk);
+  console.log('Owner wallet:', account.address);
 
-    const account = accounts.privateKeyToAccount(/** @type {`0x${string}`} */ (PRIVATE_KEY));
-    console.log('Owner wallet:', account.address);
+  const publicClient = createPublicClient({ chain: arcTestnet, transport: http() });
+  const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http() });
 
-    const client = viem.createWalletClient({
-      account,
-      chain: arcTestnet,
-      transport: viem.http(RPC),
-    }).extend(viem.publicActions);
+  // 1. Pre-check
+  console.log('\n--- Pre-check ---');
+  const before = await isWhitelisted(publicClient, CURVE_POOL);
+  console.log(`isWhitelisted(${CURVE_POOL}): ${before ? 'TRUE ✓ (already done)' : 'false'}`);
 
-    // 1. Check current state
-    const isWhitelisted = await client.readContract({
-      address: /** @type {`0x${string}`} */ (GUARDRAIL),
-      abi: [{ name: 'isWhitelisted', type: 'function', inputs: [{ type: 'address' }], outputs: [{ type: 'bool' }], stateMutability: 'view' }],
-      functionName: 'isWhitelisted',
-      args: [/** @type {`0x${string}`} */ (CURVE_POOL)],
-    }).catch(() => null);
+  if (before) {
+    console.log('\n✅ Pool already whitelisted. Nothing to do.');
+    return;
+  }
 
-    console.log(`isWhitelisted(${CURVE_POOL}):`, isWhitelisted ?? '(selector mismatch — using raw calldata)');
+  // 2. Send tx: addWhitelist(CURVE_POOL)
+  console.log('\n--- Sending tx: addWhitelist(pool) ---');
+  const calldata = (ADD_WHITELIST_SELECTOR + padAddress(CURVE_POOL));
+  console.log('to:   ', GUARDRAIL);
+  console.log('data: ', calldata);
 
-    if (isWhitelisted === true) {
-      console.log('✅  Pool đã được whitelist rồi — không cần làm gì thêm.');
-      return;
-    }
+  const txHash = await walletClient.sendTransaction({
+    to: GUARDRAIL,
+    data: calldata,
+  });
 
-    // 2. Send setWhitelisted(pool, true)
-    console.log(`\nGửi setWhitelisted(${CURVE_POOL}, true)...`);
+  console.log('txHash:', txHash);
+  console.log('Waiting for confirmation...');
 
-    const hash = await client.sendTransaction({
-      to: /** @type {`0x${string}`} */ (GUARDRAIL),
-      data: /** @type {`0x${string}`} */ (
-        '0x2a683795' +
-        '000000000000000000000000' + CURVE_POOL.slice(2).toLowerCase() +
-        '0000000000000000000000000000000000000000000000000000000000000001'
-      ),
-      gas: 100000n,
-    });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+  console.log('status:', receipt.status === 'success' ? '✅ success' : '❌ FAILED');
+  console.log('gasUsed:', receipt.gasUsed.toString());
 
-    console.log('Tx sent:', hash);
-    console.log(`Explorer: https://explorer.testnet.arc.io/tx/${hash}`);
+  if (receipt.status !== 'success') {
+    console.error('❌ Transaction reverted. Check owner address and contract state.');
+    process.exit(1);
+  }
 
-    // 3. Wait for receipt
-    console.log('Chờ confirmation...');
-    const receipt = await client.waitForTransactionReceipt({ hash });
-    console.log('Status:', receipt.status === 'success' ? '✅  SUCCESS' : '❌  FAILED');
+  // 3. Post-check
+  console.log('\n--- Post-check ---');
+  const after = await isWhitelisted(publicClient, CURVE_POOL);
+  console.log(`isWhitelisted(${CURVE_POOL}): ${after ? 'TRUE ✓' : 'false ✗ — something went wrong'}`);
 
-    // 4. Verify
-    const after = await client.readContract({
-      address: /** @type {`0x${string}`} */ (GUARDRAIL),
-      abi: [{ name: 'isWhitelisted', type: 'function', inputs: [{ type: 'address' }], outputs: [{ type: 'bool' }], stateMutability: 'view' }],
-      functionName: 'isWhitelisted',
-      args: [/** @type {`0x${string}`} */ (CURVE_POOL)],
-    }).catch(() => 'N/A');
-
-    console.log(`isWhitelisted(pool) AFTER: ${after}`);
-
-    if (after === true || after === 'N/A') {
-      console.log('\n✅  Xong! Giờ set DCA_ROUTE_PROVIDER=CURVE_DIRECT trong keeper/.env để bật swap trực tiếp.');
-    }
-
-  } catch (err) {
-    // Fallback: in calldata để dùng cast hoặc MetaMask manually
-    console.error('viem không khả dụng hoặc lỗi:', err.message);
-    console.log('\n─── Fallback: dùng cast send ───');
-    console.log(`cast send \\`);
-    console.log(`  --rpc-url ${RPC} \\`);
-    console.log(`  --private-key $OWNER_PRIVATE_KEY \\`);
-    console.log(`  ${GUARDRAIL} \\`);
-    console.log(`  "0x2a683795000000000000000000000000311d3f5530245b839dae6cf91685ae64c605e9560000000000000000000000000000000000000000000000000000000000000001"`);
+  if (after) {
+    console.log('\n✅ Done! Pool whitelisted successfully.');
+    console.log('   Now set DCA_ROUTE_PROVIDER=CURVE_DIRECT in keeper/.env to activate.');
+  } else {
+    console.error('\n❌ Pool still not whitelisted after tx. Inspect the transaction.');
   }
 }
 
-main().catch(console.error);
+main().catch(e => { console.error(e); process.exit(1); });
