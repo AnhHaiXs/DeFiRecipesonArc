@@ -5,9 +5,11 @@
  * Usage:
  *   OWNER_PRIVATE_KEY=0x<key> node keeper/scripts/whitelist-all-protocols.js
  *
- * Contracts cần whitelist (verified từ keeper logs 2026-10-05):
- *   1. Curve USDC/EURC pool  0x311d3f55... selector 0x3df02124 (exchange)
- *   2. AutoCompounder        0x6cB6eE2a... selector 0x37619e76
+ * ABI verified từ on-chain bytecode analysis 2026-10-05:
+ *   isProtocolWhitelisted(address) = 0x9387bbd4
+ *   setProtocolWhitelist(address,bool) = 0x2a683795
+ *   isSelectorAllowed(address,bytes4)  = 0xfd5d471c
+ *   setSelectorWhitelist(address,bytes4,bool) = 0xdc6b8812
  */
 
 const { createPublicClient, createWalletClient, http, defineChain } = require('viem');
@@ -22,21 +24,67 @@ const ARC_TESTNET = defineChain({
 
 const GUARDRAIL = '0xB9b1C570fa0F633bc5cc0B833078d749f108748d';
 
-// selector: addWhitelist(address) = 0xdc6b8812 (verified từ on-chain analysis)
-const ADD_WHITELIST_SELECTOR = '0xdc6b8812';
+const ABI = [
+  {
+    name: 'isProtocolWhitelisted',
+    type: 'function',
+    inputs: [{ name: 'protocol', type: 'address' }],
+    outputs: [{ type: 'bool' }],
+    stateMutability: 'view',
+  },
+  {
+    name: 'setProtocolWhitelist',
+    type: 'function',
+    inputs: [{ name: 'protocol', type: 'address' }, { name: 'allowed', type: 'bool' }],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+  {
+    name: 'isSelectorAllowed',
+    type: 'function',
+    inputs: [{ name: 'protocol', type: 'address' }, { name: 'selector', type: 'bytes4' }],
+    outputs: [{ type: 'bool' }],
+    stateMutability: 'view',
+  },
+  {
+    name: 'setSelectorWhitelist',
+    type: 'function',
+    inputs: [{ name: 'protocol', type: 'address' }, { name: 'selector', type: 'bytes4' }, { name: 'allowed', type: 'bool' }],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+];
 
 const PROTOCOLS = [
   {
     address: '0x311d3f5530245b839dae6cf91685ae64c605e956',
-    name:    'Curve USDC/EURC pool',
+    name: 'Curve USDC/EURC pool',
     selector: '0x3df02124', // exchange(int128,int128,uint256,uint256)
   },
   {
     address: '0x6cB6eE2a33F497C1a682657f15A874dc675Fa773',
-    name:    'AutoCompounder (LendingBorrowing)',
+    name: 'AutoCompounder (LendingBorrowing)',
     selector: '0x37619e76',
   },
+  {
+    address: '0xbbd70b01a1cabc96d5b7b129ae1aaabdf50dd40b',
+    name: 'ArcSwapAdapter',
+    selector: '0xaa3e079c', // execute(ExecutionParams,uint256,address)
+  },
 ];
+
+async function sendAndWait(walletClient, publicClient, args, label) {
+  console.log(`  ⏳ ${label}...`);
+  const hash = await walletClient.writeContract(args);
+  console.log(`  tx: ${hash}`);
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  if (receipt.status === 'success') {
+    console.log(`  ✅ ${label} confirmed (block ${receipt.blockNumber})`);
+  } else {
+    console.error(`  ❌ FAILED: ${label}`);
+    process.exit(1);
+  }
+}
 
 async function main() {
   const pk = process.env.OWNER_PRIVATE_KEY;
@@ -54,60 +102,61 @@ async function main() {
   const publicClient = createPublicClient({ chain: ARC_TESTNET, transport: http() });
   const walletClient = createWalletClient({ chain: ARC_TESTNET, transport: http(), account });
 
-  // ABI minimal
-  const abi = [
-    { name: 'addWhitelist',      type: 'function', inputs: [{ name: 'protocol', type: 'address' }], outputs: [], stateMutability: 'nonpayable' },
-    { name: 'isWhitelisted',     type: 'function', inputs: [{ name: 'protocol', type: 'address' }], outputs: [{ type: 'bool' }], stateMutability: 'view' },
-  ];
-
   for (const protocol of PROTOCOLS) {
     console.log(`--- ${protocol.name} ---`);
     console.log(`  address:  ${protocol.address}`);
     console.log(`  selector: ${protocol.selector}`);
 
-    // Check current state
-    const isWL = await publicClient.readContract({
-      address: GUARDRAIL,
-      abi,
-      functionName: 'isWhitelisted',
+    // 1. Check + set protocol whitelist
+    const isProtocolWL = await publicClient.readContract({
+      address: GUARDRAIL, abi: ABI,
+      functionName: 'isProtocolWhitelisted',
       args: [protocol.address],
     });
 
-    if (isWL) {
-      console.log('  ✅ Already whitelisted — skipping.');
-      console.log('');
-      continue;
-    }
-
-    console.log('  ⏳ Not whitelisted. Sending addWhitelist tx...');
-    const hash = await walletClient.writeContract({
-      address: GUARDRAIL,
-      abi,
-      functionName: 'addWhitelist',
-      args: [protocol.address],
-    });
-    console.log('  tx hash:', hash);
-
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    if (receipt.status === 'success') {
-      console.log('  ✅ Whitelisted successfully (block', receipt.blockNumber, ')');
+    if (isProtocolWL) {
+      console.log('  ✅ Protocol already whitelisted');
     } else {
-      console.log('  ❌ Tx FAILED:', receipt);
+      await sendAndWait(walletClient, publicClient, {
+        address: GUARDRAIL, abi: ABI,
+        functionName: 'setProtocolWhitelist',
+        args: [protocol.address, true],
+      }, `setProtocolWhitelist(${protocol.address}, true)`);
     }
+
+    // 2. Check + set selector whitelist
+    const isSelectorWL = await publicClient.readContract({
+      address: GUARDRAIL, abi: ABI,
+      functionName: 'isSelectorAllowed',
+      args: [protocol.address, protocol.selector],
+    });
+
+    if (isSelectorWL) {
+      console.log(`  ✅ Selector ${protocol.selector} already allowed`);
+    } else {
+      await sendAndWait(walletClient, publicClient, {
+        address: GUARDRAIL, abi: ABI,
+        functionName: 'setSelectorWhitelist',
+        args: [protocol.address, protocol.selector, true],
+      }, `setSelectorWhitelist(${protocol.address}, ${protocol.selector}, true)`);
+    }
+
     console.log('');
   }
 
   // Final verification
-  console.log('=== Final state ===');
+  console.log('=== Final verification ===');
   for (const p of PROTOCOLS) {
-    const wl = await publicClient.readContract({ address: GUARDRAIL, abi, functionName: 'isWhitelisted', args: [p.address] });
-    console.log(`isWhitelisted(${p.name.padEnd(30)}): ${wl ? '✅ TRUE' : '❌ FALSE'}`);
+    const protWL = await publicClient.readContract({ address: GUARDRAIL, abi: ABI, functionName: 'isProtocolWhitelisted', args: [p.address] });
+    const selWL  = await publicClient.readContract({ address: GUARDRAIL, abi: ABI, functionName: 'isSelectorAllowed', args: [p.address, p.selector] });
+    const ok = protWL && selWL;
+    console.log(`${ok ? '✅' : '❌'} ${p.name}`);
+    console.log(`     isProtocolWhitelisted: ${protWL}`);
+    console.log(`     isSelectorAllowed(${p.selector}): ${selWL}`);
   }
 
   console.log('');
-  console.log('NOTE: selector whitelist (setSelectorWhitelist) is handled automatically');
-  console.log('by RecipeGuardrail via selector check in contract logic.');
-  console.log('If keeper still logs selector errors, contact contract deployer to add selector ACL.');
+  console.log('Done. Rebuild server (git pull && tsc) then restart keeper.');
 }
 
 main().catch(e => { console.error('FATAL:', e.message); process.exit(1); });
