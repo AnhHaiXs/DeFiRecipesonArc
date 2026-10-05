@@ -2,8 +2,8 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle2, AlertTriangle, ArrowRight, ShieldAlert, X, CheckCheck, Loader2 } from 'lucide-react';
-import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { CheckCircle2, AlertTriangle, ArrowRight, ShieldAlert, X, CheckCheck, Loader2, Key } from 'lucide-react';
+import { useWriteContract, useWaitForTransactionReceipt, useReadContract } from 'wagmi';
 import { maxUint256 } from 'viem';
 import {
   DcaExecutionMode,
@@ -66,6 +66,32 @@ const DCA_DEFAULT_PER_EXECUTION_USDC = '5';
 const SHARED_EXECUTOR_PROXY_SPENDER = '0xcbd2de404cb02c45b8688883e4321f887a6f2fc2';
 export const DEFAULT_SESSION_SPEND_LIMIT_USDC = '500';
 
+// SessionKeyRegistry constants (Arc Testnet)
+const SESSION_KEY_REGISTRY = '0x8dA092254Fe83DeC49Cde856b2b68eB2BFb12ed9' as const;
+const KEEPER_EOA = '0xecd06D7a0191f74B9C1Fe007e02eD0B8ef32E866' as const;
+const SESSION_KEY_DEFAULT_DAYS = 365;
+
+const SESSION_KEY_REGISTRY_ABI = [
+  {
+    name: 'isValidSessionKey',
+    type: 'function' as const,
+    inputs: [{ name: 'user', type: 'address' }, { name: 'keeper', type: 'address' }],
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'view' as const,
+  },
+  {
+    name: 'registerSessionKey',
+    type: 'function' as const,
+    inputs: [
+      { name: 'keeper', type: 'address' },
+      { name: 'validUntil', type: 'uint64' },
+      { name: 'maxSpendLimit', type: 'uint256' },
+    ],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+] as const;
+
 interface SimulationModalProps {
   isOpen: boolean;
   recipe: RecipeConfig | null;
@@ -123,6 +149,31 @@ export const SimulationModal: React.FC<SimulationModalProps> = ({
   const { writeContract, data: approveTxHash } = useWriteContract();
   const { isLoading: isApproveConfirming, isSuccess: isApproveConfirmed } = useWaitForTransactionReceipt({ hash: approveTxHash });
 
+  // Session key state
+  const [registerSessionKeyTxHash, setRegisterSessionKeyTxHash] = useState<`0x${string}` | undefined>(undefined);
+  const [isRegisteringSessionKey, setIsRegisteringSessionKey] = useState(false);
+  const { writeContract: writeSessionKeyContract, data: sessionKeyTxHash } = useWriteContract();
+  const { isLoading: isSessionKeyConfirming, isSuccess: isSessionKeyConfirmed } = useWaitForTransactionReceipt({ hash: registerSessionKeyTxHash });
+
+  // Track sessionKeyTxHash for receipt watching
+  useEffect(() => {
+    if (sessionKeyTxHash) setRegisterSessionKeyTxHash(sessionKeyTxHash);
+  }, [sessionKeyTxHash]);
+
+  // handleRegisterSessionKey — defined here, refetchSessionKey used below after isDcaRecipe
+  const handleRegisterSessionKey = () => {
+    if (!connectedAddress) return;
+    setIsRegisteringSessionKey(true);
+    const validUntil = BigInt(Math.floor(Date.now() / 1000) + SESSION_KEY_DEFAULT_DAYS * 86400);
+    const maxSpendLimit = BigInt(Math.round(parseFloat(sessionSpendLimitUsdc || DEFAULT_SESSION_SPEND_LIMIT_USDC) * 1_000_000));
+    writeSessionKeyContract({
+      address: SESSION_KEY_REGISTRY,
+      abi: SESSION_KEY_REGISTRY_ABI,
+      functionName: 'registerSessionKey',
+      args: [KEEPER_EOA, validUntil, maxSpendLimit],
+    });
+  };
+
   // After approve confirmed — refresh allowance check and mark spender approved
   useEffect(() => {
     if (isApproveConfirmed && approvingSpender) {
@@ -169,6 +220,24 @@ export const SimulationModal: React.FC<SimulationModalProps> = ({
   }, [recipe]);
 
   const isDcaRecipe = recipe?.recipeType === 'RECURRING_DCA';
+
+  // Session key read — placed after isDcaRecipe to avoid "used before declaration" error
+  const { data: isSessionKeyValid, refetch: refetchSessionKey } = useReadContract({
+    address: SESSION_KEY_REGISTRY,
+    abi: SESSION_KEY_REGISTRY_ABI,
+    functionName: 'isValidSessionKey',
+    args: connectedAddress ? [connectedAddress, KEEPER_EOA] : undefined,
+    query: { enabled: Boolean(connectedAddress) && isDcaRecipe },
+  });
+
+  // After session key confirmed — refetch
+  useEffect(() => {
+    if (isSessionKeyConfirmed) {
+      setIsRegisteringSessionKey(false);
+      void refetchSessionKey();
+    }
+  }, [isSessionKeyConfirmed, refetchSessionKey]);
+
   let sessionSpendLimitValidationError: string | null = null;
   try {
     parseUsdcAmountToBaseUnits(sessionSpendLimitUsdc, 'Session spending limit');
@@ -536,6 +605,43 @@ export const SimulationModal: React.FC<SimulationModalProps> = ({
               </div>
 
               <div className="space-y-4">
+                {/* Session Key Required banner */}
+                {isDcaRecipe && connectedAddress && isSessionKeyValid === false ? (
+                  <div className="rounded-xl border border-violet-700/60 bg-violet-950/40 p-4 text-xs text-violet-200 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Key className="h-4 w-4 shrink-0 text-violet-400" />
+                      <span className="font-semibold uppercase tracking-wider text-violet-300">Keeper Authorization Required</span>
+                    </div>
+                    <p className="leading-relaxed text-violet-200">
+                      Your wallet has not authorized the keeper to execute DCA on your behalf.
+                      You need to register a <span className="font-mono text-white">Session Key</span> on{' '}
+                      <span className="font-mono text-[10px] text-violet-300">SessionKeyRegistry</span> once — this is a one-time per-wallet action.
+                    </p>
+                    <div className="rounded-lg border border-violet-800/50 bg-violet-900/30 px-3 py-2 font-mono text-[10px] text-violet-300 space-y-1">
+                      <div>Keeper: <span className="text-white">{KEEPER_EOA}</span></div>
+                      <div>Valid for: <span className="text-white">{SESSION_KEY_DEFAULT_DAYS} days</span></div>
+                      <div>Max spend: <span className="text-white">{sessionSpendLimitUsdc || DEFAULT_SESSION_SPEND_LIMIT_USDC} USDC</span></div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isRegisteringSessionKey || isSessionKeyConfirming}
+                      onClick={handleRegisterSessionKey}
+                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isRegisteringSessionKey || isSessionKeyConfirming ? (
+                        <><Loader2 className="h-4 w-4 animate-spin" /> Registering…</>
+                      ) : (
+                        <><Key className="h-4 w-4" /> Register Session Key</>
+                      )}
+                    </button>
+                  </div>
+                ) : isDcaRecipe && connectedAddress && isSessionKeyValid === true ? (
+                  <div className="flex items-center gap-2 rounded-xl border border-emerald-800/50 bg-emerald-950/30 px-4 py-2.5 text-xs text-emerald-300">
+                    <CheckCheck className="h-4 w-4 shrink-0" />
+                    <span>Keeper session key active — DCA execution authorized</span>
+                  </div>
+                ) : null}
+
                 <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
                   <div className="text-xs uppercase tracking-wider font-mono text-slate-400">{t('quickSummary')}</div>
                   <div className="mt-3 space-y-3">
