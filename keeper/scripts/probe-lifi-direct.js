@@ -48,17 +48,17 @@ async function probe() {
     fromAddress: FROM_ADDRESS,
     toAddress: FROM_ADDRESS,
     slippage,
-    integrator: INTEGRATOR,
+    // No integrator= and no allowExchanges= — partner integrator triggers TOOL_NOT_ALLOWED for fly.
+    // Public routing picks the best available exchange automatically.
     allowBridges: '',
-    allowExchanges: 'fly',
   });
 
   const url = `${LIFI_BASE}/v1/quote?${params.toString()}`;
 
+  // IMPORTANT: Do NOT send x-lifi-api-key on /v1/quote.
+  // A registered partner key causes LI.FI to enforce partner exchange whitelist,
+  // blocking "fly" with TOOL_NOT_ALLOWED on Arc Testnet. Anonymous mode works fine.
   const headers = { Accept: 'application/json' };
-  if (LIFI_API_KEY) {
-    headers['x-lifi-api-key'] = LIFI_API_KEY;
-  }
 
   console.log('='.repeat(60));
   console.log('LI.FI Direct Probe — Arc Testnet DCA Route');

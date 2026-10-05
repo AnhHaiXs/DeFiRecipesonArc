@@ -786,7 +786,12 @@ class LiFiDirectDcaSwapRouteClient implements DcaSwapRouteClient {
   constructor() {
     const rawBase = process.env.LIFI_API_BASE_URL?.trim();
     this.baseUrl = rawBase && rawBase.length > 0 ? rawBase.replace(/\/$/, '') : 'https://li.quest';
-    this.apiKey = process.env.LIFI_API_KEY?.trim() || undefined;
+    // IMPORTANT: Do NOT send x-lifi-api-key on /v1/quote requests.
+    // When a registered partner API key is attached, LI.FI enforces the partner's exchange
+    // whitelist and returns TOOL_NOT_ALLOWED for "fly" on Arc Testnet, even though the
+    // same route succeeds in anonymous (no-key) mode. The API key is reserved for future
+    // authenticated endpoints that explicitly require it (e.g. status, gas estimation).
+    this.apiKey = undefined;
     this.integrator = normalizeLiFiIntegrator(process.env.LIFI_INTEGRATOR);
   }
 
@@ -807,10 +812,12 @@ class LiFiDirectDcaSwapRouteClient implements DcaSwapRouteClient {
       toAddress: request.recipientAddress,
       // LI.FI uses decimal slippage (0.005 = 0.5%), not bps
       slippage: (request.maxSlippageBps / 10_000).toString(),
-      integrator: this.integrator,
-      // Disable bridge routes — only on-chain Fly DEX swap needed
+      // NOTE: do NOT pass integrator= or allowExchanges= here.
+      // When integrator is set to a registered partner, LI.FI enforces its whitelist and
+      // blocks the "fly" tool with TOOL_NOT_ALLOWED. Without integrator the public routing
+      // logic applies and LI.FI picks the best available exchange automatically.
+      // allowBridges='' keeps it same-chain only (no cross-chain bridge routes).
       allowBridges: '',
-      allowExchanges: 'fly',
     });
     return `${this.baseUrl}/v1/quote?${params.toString()}`;
   }
