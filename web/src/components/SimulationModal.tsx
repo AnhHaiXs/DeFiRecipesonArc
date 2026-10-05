@@ -2,7 +2,9 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle2, AlertTriangle, ArrowRight, ShieldAlert, X } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, ArrowRight, ShieldAlert, X, CheckCheck, Loader2 } from 'lucide-react';
+import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { maxUint256 } from 'viem';
 import {
   DcaExecutionMode,
   estimateDcaRuns,
@@ -115,6 +117,42 @@ export const SimulationModal: React.FC<SimulationModalProps> = ({
   const [allowanceCheck, setAllowanceCheck] = useState<DcaAllowancePrecheckResult | null>(null);
   const [allowanceCheckError, setAllowanceCheckError] = useState<string>('');
   const [isCheckingAllowance, setIsCheckingAllowance] = useState(false);
+  const [approvingSpender, setApprovingSpender] = useState<string | null>(null);
+  const [approvedSpenders, setApprovedSpenders] = useState<Set<string>>(new Set());
+
+  const { writeContract, data: approveTxHash } = useWriteContract();
+  const { isLoading: isApproveConfirming, isSuccess: isApproveConfirmed } = useWaitForTransactionReceipt({ hash: approveTxHash });
+
+  // After approve confirmed — refresh allowance check and mark spender approved
+  useEffect(() => {
+    if (isApproveConfirmed && approvingSpender) {
+      setApprovedSpenders(prev => new Set([...prev, approvingSpender.toLowerCase()]));
+      setApprovingSpender(null);
+      // Auto-refresh allowance check
+      void runAllowanceCheck();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isApproveConfirmed]);
+
+  const USDC_ADDRESS = '0x3600000000000000000000000000000000000000' as const;
+  const ERC20_APPROVE_ABI = [{
+    name: 'approve',
+    type: 'function' as const,
+    inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }],
+    outputs: [{ type: 'bool' }],
+    stateMutability: 'nonpayable' as const,
+  }] as const;
+
+  const handleApprove = (spender: `0x${string}`, amountBaseUnits: string) => {
+    setApprovingSpender(spender.toLowerCase());
+    writeContract({
+      address: USDC_ADDRESS,
+      abi: ERC20_APPROVE_ABI,
+      functionName: 'approve',
+      args: [spender, maxUint256],
+    });
+    void amountBaseUnits; // suppress unused warning — we approve maxUint256
+  };
 
   useEffect(() => {
     if (recipe) {
@@ -428,27 +466,64 @@ export const SimulationModal: React.FC<SimulationModalProps> = ({
                           <div className="text-rose-300">{allowanceCheckError}</div>
                         ) : null}
                         {allowanceCheck ? (
-                          <div className="space-y-1">
-                            <div>{t('runtimeSpender')}: <span className="font-mono text-white break-all">{allowanceCheck.runtimeSpender}</span></div>
-                            <div>{t('targetProtocol')}: <span className="font-mono text-white break-all">{allowanceCheck.targetProtocolAddress}</span></div>
-                            <div>{t('allowanceNow')}: <span className="font-mono text-white">{formatUsdcBaseUnits(allowanceCheck.currentAllowanceBaseUnits)} USDC</span></div>
+                          <div className="space-y-2">
+                            <div className="text-[11px] text-cyan-300">{t('runtimeSpender')}: <span className="font-mono text-white break-all">{allowanceCheck.runtimeSpender}</span></div>
+                            <div className="text-[11px] text-cyan-300">{t('targetProtocol')}: <span className="font-mono text-white break-all">{allowanceCheck.targetProtocolAddress}</span></div>
+
+                            {/* Per-spender allowance rows with Approve buttons */}
                             {allowanceCheck.requiredSpenders && allowanceCheck.requiredSpenders.length > 0 ? (
-                              <div>
-                                {t('requiredApprovals')}:
-                                {allowanceCheck.requiredSpenders.map((spender) => (
-                                  <div key={spender} className="font-mono text-white break-all">
-                                    {spender} : {formatUsdcBaseUnits(allowanceCheck.allowanceBySpender?.[spender.toLowerCase()] || '0')} USDC
-                                  </div>
-                                ))}
+                              <div className="space-y-1.5 pt-1">
+                                <div className="text-[11px] font-semibold text-cyan-200 uppercase tracking-wider">{t('requiredApprovals')}</div>
+                                {allowanceCheck.requiredSpenders.map((spender) => {
+                                  const current = BigInt(allowanceCheck.allowanceBySpender?.[spender.toLowerCase()] || '0');
+                                  const required = BigInt(allowanceCheck.requiredForSchedulerBaseUnits || '0');
+                                  const isEnough = current >= required;
+                                  const isThisApproving = approvingSpender === spender.toLowerCase();
+                                  const wasApproved = approvedSpenders.has(spender.toLowerCase());
+                                  return (
+                                    <div key={spender} className="flex items-center justify-between gap-2 rounded-lg border border-slate-700/60 bg-slate-900/60 px-2.5 py-1.5">
+                                      <div className="min-w-0 flex-1">
+                                        <div className="truncate font-mono text-[10px] text-slate-400">{spender}</div>
+                                        <div className={`text-[11px] font-medium ${isEnough || wasApproved ? 'text-emerald-300' : 'text-amber-300'}`}>
+                                          {formatUsdcBaseUnits(current.toString())} / {formatUsdcBaseUnits(required.toString())} USDC
+                                          {(isEnough || wasApproved) ? ' ✓' : ' — needs approval'}
+                                        </div>
+                                      </div>
+                                      {!isEnough && !wasApproved ? (
+                                        <button
+                                          type="button"
+                                          disabled={isThisApproving || isApproveConfirming}
+                                          onClick={() => handleApprove(spender, required.toString())}
+                                          className="flex shrink-0 items-center gap-1 rounded-lg bg-blue-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                                        >
+                                          {isThisApproving || (isApproveConfirming && approvingSpender === spender.toLowerCase()) ? (
+                                            <><Loader2 className="h-3 w-3 animate-spin" /> Approving…</>
+                                          ) : (
+                                            'Approve USDC'
+                                          )}
+                                        </button>
+                                      ) : (
+                                        <span className="flex shrink-0 items-center gap-1 rounded-lg bg-emerald-900/50 px-2.5 py-1 text-[11px] text-emerald-300">
+                                          <CheckCheck className="h-3 w-3" /> Approved
+                                        </span>
+                                      )}
+                                    </div>
+                                  );
+                                })}
                               </div>
-                            ) : null}
-                            <div>{t('requiredScheduler')}: <span className="font-mono text-white">{formatUsdcBaseUnits(allowanceCheck.requiredForSchedulerBaseUnits)} USDC</span></div>
-                            <div>{t('requiredActivation')}: <span className="font-mono text-white">{formatUsdcBaseUnits(allowanceCheck.requiredForActivationBaseUnits)} USDC</span></div>
-                            <div className={allowanceCheck.isEnoughForScheduler ? 'text-emerald-300' : 'text-amber-200'}>
-                              {t('schedulerReadiness')}: {allowanceCheck.isEnoughForScheduler ? t('ready') : t('notReady')}
-                            </div>
-                            <div className={allowanceCheck.isEnoughForActivation ? 'text-emerald-300' : 'text-amber-200'}>
-                              {t('activationReadiness')}: {allowanceCheck.isEnoughForActivation ? t('ready') : t('willRequireApprove')}
+                            ) : (
+                              <div className="text-[11px] text-cyan-300">{t('allowanceNow')}: <span className="font-mono text-white">{formatUsdcBaseUnits(allowanceCheck.currentAllowanceBaseUnits)} USDC</span></div>
+                            )}
+
+                            <div className="pt-1 space-y-1">
+                              <div className="text-[11px] text-cyan-300">{t('requiredScheduler')}: <span className="font-mono text-white">{formatUsdcBaseUnits(allowanceCheck.requiredForSchedulerBaseUnits)} USDC</span></div>
+                              <div className="text-[11px] text-cyan-300">{t('requiredActivation')}: <span className="font-mono text-white">{formatUsdcBaseUnits(allowanceCheck.requiredForActivationBaseUnits)} USDC</span></div>
+                              <div className={`text-[11px] font-medium ${allowanceCheck.isEnoughForScheduler ? 'text-emerald-300' : 'text-amber-200'}`}>
+                                {t('schedulerReadiness')}: {allowanceCheck.isEnoughForScheduler ? '✅ ' + t('ready') : '⚠️ ' + t('notReady')}
+                              </div>
+                              <div className={`text-[11px] font-medium ${allowanceCheck.isEnoughForActivation ? 'text-emerald-300' : 'text-amber-200'}`}>
+                                {t('activationReadiness')}: {allowanceCheck.isEnoughForActivation ? '✅ ' + t('ready') : '⚠️ ' + t('willRequireApprove')}
+                              </div>
                             </div>
                           </div>
                         ) : null}
