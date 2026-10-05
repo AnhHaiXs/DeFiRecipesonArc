@@ -419,6 +419,11 @@ class AppKitDcaSwapRouteClient implements DcaSwapRouteClient {
       headers.Authorization = `Bearer ${apiKey}`;
     }
 
+    // IMPORTANT: fromAddress must be ARC_SWAP_ADAPTER_ADDRESS, not the user wallet.
+    // Circle Stablecoin Service generates signed executionParams for the adapter contract
+    // to execute on-chain. If fromAddress = user wallet, the service returns 331001
+    // "No route available" because it cannot find a route from a regular EOA.
+    // The adapter is the actual msg.sender for the swap; toAddress receives the output tokens.
     const response = await fetch(endpoint, {
       method: 'POST',
       headers,
@@ -427,7 +432,7 @@ class AppKitDcaSwapRouteClient implements DcaSwapRouteClient {
         tokenInChain: 'Arc_Testnet',
         tokenOutAddress: this.getTokenOutAddress(request.targetAssetSymbol),
         tokenOutChain: 'Arc_Testnet',
-        fromAddress: request.recipientAddress,
+        fromAddress: ARC_SWAP_ADAPTER_ADDRESS,
         toAddress: request.recipientAddress,
         amount: request.amountInBaseUnits.toString(),
         slippageBps: request.maxSlippageBps,
@@ -492,7 +497,7 @@ function readOptionalModuleFunction<T>(module: unknown, exportName: string): T |
 
 function normalizeRuntimeProvider(
   value: string | undefined
-): 'ARC_LIFI_SWAP' | 'ARC_APP_KIT_SWAP' | 'LIFI_DIRECT' | 'CURVE_DIRECT' {
+): 'ARC_LIFI_SWAP' | 'ARC_APP_KIT_SWAP' | 'LIFI_DIRECT' | 'CURVE_DIRECT' | 'CIRCLE_DIRECT' {
   const normalized = value?.trim().toUpperCase();
   if (!normalized || ['ARC_LIFI_SWAP', 'LIFI_SWAP', 'LIFI'].includes(normalized)) {
     return 'ARC_LIFI_SWAP';
@@ -510,8 +515,17 @@ function normalizeRuntimeProvider(
     return 'CURVE_DIRECT';
   }
 
+  if (['CIRCLE_DIRECT', 'CIRCLE_STABLECOIN', 'CIRCLE_API'].includes(normalized)) {
+    return 'CIRCLE_DIRECT';
+  }
+
   throw new Error(
-    `Unsupported DCA_ROUTE_PROVIDER=${value}. Supported: ARC_LIFI_SWAP, ARC_APP_KIT_SWAP, LIFI_DIRECT, CURVE_DIRECT.`
+    `Unsupported DCA_ROUTE_PROVIDER=${value}. Supported values: ` +
+    `ARC_LIFI_SWAP (aliases: LIFI_SWAP, LIFI), ` +
+    `ARC_APP_KIT_SWAP (aliases: APP_KIT_SWAP, APP_KIT), ` +
+    `LIFI_DIRECT (aliases: LIFI_REST, LIFI_API), ` +
+    `CIRCLE_DIRECT (aliases: CIRCLE_STABLECOIN, CIRCLE_API), ` +
+    `CURVE_DIRECT (deprecated, aliases: CURVE, CURVE_STABLE).`
   );
 }
 
@@ -1117,6 +1131,242 @@ class CurveDirectDcaSwapRouteClient implements DcaSwapRouteClient {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CircleStablecoinDirectClient
+//
+// Gọi Circle Stablecoin Service (/v1/stablecoinKits/swap) trực tiếp với:
+//   1. fromAddress = ARC_SWAP_ADAPTER_ADDRESS (required — user EOA returns 331001)
+//   2. Retry exponential backoff + jitter (Circle service là intermittent ~40% fail)
+//   3. On-chain Curve get_dy() làm minOut fallback khi stopLimit absent
+//
+// Kết quả: calldata hoàn chỉnh có Circle EIP-712 signature — không cần API key,
+// không cần LI.FI, không cần empty-sig hack.
+//
+// Kích hoạt: DCA_ROUTE_PROVIDER=CIRCLE_DIRECT
+//
+// Env vars (optional):
+//   ARC_APP_KIT_SWAP_BASE_URL  — Circle API base, default https://api.circle.com
+//   ARC_APP_KIT_API_KEY        — Kit Key nếu có (dạng KIT_KEY:xxx:yyy)
+//   ARC_RPC_URL                — Arc RPC, default https://rpc.testnet.arc.io
+//   CIRCLE_DIRECT_MAX_RETRIES  — số lần retry, default 5
+//   CIRCLE_DIRECT_BASE_DELAY_MS— base delay ms cho exponential backoff, default 800
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CIRCLE_NO_ROUTE_CODES = new Set([331001, 331002, 331003]);
+
+function isCircleNoRouteError(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    if (typeof parsed.code === 'number' && CIRCLE_NO_ROUTE_CODES.has(parsed.code)) {
+      return true;
+    }
+    const msg = typeof parsed.message === 'string' ? parsed.message.toLowerCase() : '';
+    return msg.includes('no route') || msg.includes('route not found');
+  } catch {
+    return body.toLowerCase().includes('no route');
+  }
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class CircleStablecoinDirectClient implements DcaSwapRouteClient {
+  private readonly baseUrl: string;
+  private readonly apiKey: string | undefined;
+  private readonly rpcUrl: string;
+  private readonly maxRetries: number;
+  private readonly baseDelayMs: number;
+
+  constructor() {
+    const rawBase = process.env.ARC_APP_KIT_SWAP_BASE_URL?.trim() ||
+      process.env.ARC_APP_KIT_API_BASE_URL?.trim();
+    this.baseUrl = rawBase && rawBase.length > 0 ? rawBase.replace(/\/$/, '') : 'https://api.circle.com';
+    const rawKey = process.env.ARC_APP_KIT_API_KEY?.trim() || process.env.ARC_APP_KIT_KEY?.trim();
+    this.apiKey = rawKey && KIT_KEY_PATTERN.test(rawKey) ? rawKey : undefined;
+    this.rpcUrl = process.env.ARC_RPC_URL?.trim() || 'https://rpc.testnet.arc.io';
+    this.maxRetries = Math.max(1, parseInt(process.env.CIRCLE_DIRECT_MAX_RETRIES || '5', 10) || 5);
+    this.baseDelayMs = Math.max(100, parseInt(process.env.CIRCLE_DIRECT_BASE_DELAY_MS || '800', 10) || 800);
+  }
+
+  private getTokenOutAddress(targetAssetSymbol: string): `0x${string}` {
+    if (targetAssetSymbol === 'EURC') return ARC_EURC_ADDRESS;
+    if (targetAssetSymbol === 'cirBTC') return ARC_CIRBTC_ADDRESS;
+    throw new Error(`CircleStablecoinDirect: unsupported targetAssetSymbol=${targetAssetSymbol}.`);
+  }
+
+  /** On-chain Curve get_dy() — fallback minOut khi Circle không trả stopLimit */
+  private async getCurveMinOut(
+    amountIn: bigint,
+    slippageBps: number,
+    targetAssetSymbol: string
+  ): Promise<bigint> {
+    if (targetAssetSymbol !== 'EURC') {
+      return fallbackMinOutFromInput(amountIn, slippageBps);
+    }
+
+    try {
+      // get_dy(int128 i, int128 j, uint256 dx) selector = 0x5e0d443f
+      const calldata =
+        '0x5e0d443f' +
+        BigInt(CURVE_POOL_USDC_INDEX).toString(16).padStart(64, '0') +
+        BigInt(CURVE_POOL_EURC_INDEX).toString(16).padStart(64, '0') +
+        amountIn.toString(16).padStart(64, '0');
+
+      const response = await fetch(this.rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_call',
+          params: [{ to: CURVE_USDC_EURC_POOL_ARC_TESTNET, data: calldata }, 'latest'],
+          id: 1,
+        }),
+      });
+      const json = (await response.json()) as { result?: string };
+      const result = json.result;
+      if (result && result !== '0x') {
+        const quotedDy = BigInt(result);
+        if (quotedDy > 0n) {
+          return (quotedDy * BigInt(10_000 - slippageBps)) / 10_000n;
+        }
+      }
+    } catch {
+      // fallback below
+    }
+
+    return fallbackMinOutFromInput(amountIn, slippageBps);
+  }
+
+  private async callCircleService(request: DcaSwapRouteRequest): Promise<unknown> {
+    const endpoint = new URL('/v1/stablecoinKits/swap', this.baseUrl).toString();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+    if (this.apiKey) {
+      headers.Authorization = `Bearer ${this.apiKey}`;
+    }
+
+    const body = JSON.stringify({
+      tokenInAddress: ARC_USDC_ADDRESS,
+      tokenInChain: 'Arc_Testnet',
+      tokenOutAddress: this.getTokenOutAddress(request.targetAssetSymbol),
+      tokenOutChain: 'Arc_Testnet',
+      // fromAddress MUST be ArcSwapAdapter — user EOA causes 331001 "No route available"
+      fromAddress: ARC_SWAP_ADAPTER_ADDRESS,
+      toAddress: request.recipientAddress,
+      amount: request.amountInBaseUnits.toString(),
+      slippageBps: request.maxSlippageBps,
+    });
+
+    const response = await fetch(endpoint, { method: 'POST', headers, body });
+    const rawBody = await response.text();
+
+    if (!response.ok) {
+      if (isCircleNoRouteError(rawBody)) {
+        throw new Error(`circle:no_route: ${rawBody}`);
+      }
+      throw new Error(`circle:http_${response.status}: ${rawBody}`);
+    }
+
+    if (rawBody.length === 0) {
+      throw new Error('circle:empty: Circle Stablecoin Service returned empty response.');
+    }
+
+    const parsed = JSON.parse(rawBody) as unknown;
+
+    // Successful 200 can still carry no-route in body (non-standard)
+    if (isRecord(parsed) && typeof parsed.code === 'number' && CIRCLE_NO_ROUTE_CODES.has(parsed.code)) {
+      throw new Error(`circle:no_route: ${rawBody}`);
+    }
+
+    return parsed;
+  }
+
+  private async callWithRetry(request: DcaSwapRouteRequest): Promise<unknown> {
+    let lastError: Error = new Error('CircleStablecoinDirect: no attempts made.');
+
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try {
+        const result = await this.callCircleService(request);
+        if (attempt > 1) {
+          console.log(
+            `[Circle Stablecoin Direct] Succeeded on attempt ${attempt}/${this.maxRetries}.`
+          );
+        }
+        return result;
+      } catch (error: unknown) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        const isNoRoute = lastError.message.startsWith('circle:no_route');
+        const isRetryable = isNoRoute || lastError.message.startsWith('circle:http_5');
+
+        if (!isRetryable || attempt === this.maxRetries) {
+          break;
+        }
+
+        // Exponential backoff with ±25% jitter
+        const jitter = 1 + (Math.random() * 0.5 - 0.25);
+        const delay = Math.round(this.baseDelayMs * Math.pow(2, attempt - 1) * jitter);
+        console.log(
+          `[Circle Stablecoin Direct] Attempt ${attempt}/${this.maxRetries} failed (${lastError.message.slice(0, 80)}). Retrying in ${delay}ms…`
+        );
+        await sleep(delay);
+      }
+    }
+
+    // All retries exhausted
+    const msg = lastError.message.startsWith('circle:no_route')
+      ? 'Circle Stablecoin Service: no route available after retries. ' +
+        'The service is intermittent on Arc Testnet — try again later or switch DCA_ROUTE_PROVIDER.'
+      : `Circle Stablecoin Direct failed after ${this.maxRetries} attempts: ${lastError.message}`;
+
+    throw new Error(msg);
+  }
+
+  async resolveRoute(request: DcaSwapRouteRequest): Promise<DcaSwapExecutionPlan> {
+    // Kick off on-chain Curve quote in parallel with Circle API call
+    const curveMinOutPromise = this.getCurveMinOut(
+      request.amountInBaseUnits,
+      request.maxSlippageBps,
+      request.targetAssetSymbol
+    );
+
+    const response = await this.callWithRetry(request);
+
+    const { executionParams, signature } = parseAdapterExecutionPayload(response);
+    const callData = buildArcSwapAdapterExecuteCallData({
+      executionParams,
+      signature,
+      tokenInAddress: ARC_USDC_ADDRESS,
+      amountInBaseUnits: request.amountInBaseUnits,
+    });
+
+    // Prefer Circle's stopLimit; fall back to on-chain Curve quote if absent or zero
+    let minSwapAssetOutBaseUnits = extractAdapterStopLimit(response, executionParams);
+    if (minSwapAssetOutBaseUnits === 0n) {
+      minSwapAssetOutBaseUnits = await curveMinOutPromise;
+      console.log(
+        `[Circle Stablecoin Direct] stopLimit absent from Circle response — using on-chain Curve minOut=${minSwapAssetOutBaseUnits.toString()}`
+      );
+    }
+
+    console.log(
+      `[Circle Stablecoin Direct] Route resolved from=USDC to=${request.targetAssetSymbol} ` +
+      `amountIn=${request.amountInBaseUnits.toString()} minOut=${minSwapAssetOutBaseUnits.toString()} ` +
+      `execId=${executionParams.execId.toString()} deadline=${executionParams.deadline.toString()} ` +
+      `spender=${ARC_SWAP_ADAPTER_ADDRESS}`
+    );
+
+    return {
+      targetProtocolAddress: ARC_SWAP_ADAPTER_ADDRESS,
+      callData,
+      minSwapAssetOutBaseUnits,
+      spenderAddress: ARC_SWAP_ADAPTER_ADDRESS,
+    };
+  }
+}
+
 function createAppKitDcaSwapRouteClient(): DcaSwapRouteClient {
   return new AppKitDcaSwapRouteClient();
 }
@@ -1126,6 +1376,10 @@ export function createDcaSwapRouteClientFromRuntime(): DcaSwapRouteClient {
 
   if (provider === 'ARC_APP_KIT_SWAP') {
     return createAppKitDcaSwapRouteClient();
+  }
+
+  if (provider === 'CIRCLE_DIRECT') {
+    return new CircleStablecoinDirectClient();
   }
 
   if (provider === 'LIFI_DIRECT') {
