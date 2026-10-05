@@ -15,14 +15,16 @@ export const ARC_SWAP_ADAPTER_EXECUTE_SELECTOR = '0xaa3e079c' as const;
 // Source: li.quest/v1/quote?fromChain=5042002&toChain=5042002&fromToken=USDC&toToken=EURC
 export const LIFI_FLY_DEX_ROUTER_ARC_TESTNET = '0xff70f4a1d11995621854f3692acf286d8acd04b2' as const;
 
-// Curve StableSwap pool WUSDC/EURC on Arc Testnet (chainId=5042002).
-// Verified on-chain 2026-10-05:
-//   coin[0] = USDC (0x3600...), coin[1] = EURC (0x89B5...)
-//   balances: ~170k USDC / ~18k EURC (4935 LP holders)
-//   get_dy(0, 1, 1_000_000) = ~891_883 (0.89 EURC per 1 USDC, skewed pool)
+// Curve StableSwap pool USDC/EURC on Arc Testnet (chainId=5042002).
+// Verified on-chain 2026-10-05 via txn 0x8f1d2b11...:
+//   This is the ACTUAL pool used by FlyDEX Router (0xff70f4...) for USDC->EURC swap.
+//   get_dy(0, 1, 5_000_000) = ~5_010_340 (1.002 EURC per 1 USDC — healthy pool)
 //   exchange(i=0, j=1, dx, min_dy) — approve pool as spender before calling
-//   Source: explorer.testnet.arc.io/address/0x0714027E44802b2Ff76389daF5371990CC3a4C24
-export const CURVE_USDC_EURC_POOL_ARC_TESTNET = '0x0714027e44802b2ff76389daf5371990cc3a4c24' as const;
+//   selector: 0x3df02124 (exchange(int128,int128,uint256,uint256))
+//   Source: decoded from tx logs, confirmed via eth_call get_dy
+//
+// NOTE: pool 0x0714027e is a different (older, skewed) pool — do NOT use.
+export const CURVE_USDC_EURC_POOL_ARC_TESTNET = '0x311d3f5530245b839dae6cf91685ae64c605e956' as const;
 // Coin indices for CURVE_USDC_EURC_POOL_ARC_TESTNET
 export const CURVE_POOL_USDC_INDEX = 0 as const;   // coin[0] = USDC
 export const CURVE_POOL_EURC_INDEX = 1 as const;   // coin[1] = EURC
