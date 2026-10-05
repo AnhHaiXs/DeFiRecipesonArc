@@ -1071,7 +1071,10 @@ export async function pollAndTriggerActiveRecipes() {
           try {
             const routePlan = await dcaSwapRouteClient.resolveRoute({
               recipientAddress: recipe.userAddress as `0x${string}`,
-              sourceAddress: CONTRACT_ADDRESSES.sharedExecutorProxy,
+              // Use keeper EOA as fromAddress for LI.FI — contract addresses are rejected
+              // by the LI.FI quoting API. The actual swap is executed by sharedExecutorProxy
+              // on-chain; fromAddress here is only used by LI.FI for route construction.
+              sourceAddress: keeperAccount.address,
               amountInBaseUnits: dcaExecutionAmount,
               maxSlippageBps,
               targetAssetSymbol,
@@ -1280,14 +1283,17 @@ export async function pollAndTriggerActiveRecipes() {
           continue;
         }
 
-        // Pre-flight static simulation via eth_call
+        // Pre-flight static simulation via eth_call.
+        // minAmountOut is passed as 0n so the on-chain slippage guard doesn't block the preflight
+        // when the simulation runs without the user's real token balance (keeper has 0 USDC).
+        // The real execution uses the route plan's minSwapAssetOutBaseUnits.
         const simResult = await simulateRecipeStep(
           {
             userAddress: recipe.userAddress as `0x${string}`,
             executorProxyAddress: CONTRACT_ADDRESSES.sharedExecutorProxy as `0x${string}`,
             targetProtocolAddress: targetProtocol as `0x${string}`,
             callData,
-            minAmountOut: BigInt(minAmountOut),
+            minAmountOut: 0n,
             keeperAddress: keeperAccount.address,
           },
           {
