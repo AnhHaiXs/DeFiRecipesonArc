@@ -22,6 +22,11 @@ jobs:
 
       - name: Run Forge Tests
         run: |
+          # Skip gracefully when contracts/ directory has no Solidity source files yet
+          if [ -z "$(find contracts -name '*.sol' 2>/dev/null | head -1)" ]; then
+            echo "No .sol files found in contracts/ — skipping forge test."
+            exit 0
+          fi
           cd contracts
           forge test -vvv
 

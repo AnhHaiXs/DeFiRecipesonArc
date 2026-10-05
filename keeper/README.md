@@ -51,46 +51,56 @@ npm run db:migrate
 The SQL runner stores applied migrations in `_sql_migrations` with checksum verification.
 If a migration checksum changes after being applied, the runner will fail to prevent drift.
 
-## DCA routing policy (partial migration)
+## DCA routing policy
 
-RECURRING_DCA now uses LI.FI route resolution on Arc Testnet by default:
+`RECURRING_DCA` recipes use `dcaSwapRouteClient` to resolve a swap route on Arc Testnet and return a
+`targetProtocolAddress` + `callData` pair for execution.
 
-1. Keeper resolves route + transaction payload through `dcaSwapRouteClient` (LI.FI, Arc-only).
-2. Keeper executes the returned `targetProtocolAddress` and `callData` directly.
-3. If LI.FI returns `No route available`, the recipe is skipped for that cycle and logged as action-required.
+### Providers (controlled by `DCA_ROUTE_PROVIDER` in `.env`)
 
-Runtime notes:
+| Value | Aliases | Description |
+|---|---|---|
+| `ARC_LIFI_SWAP` | `LIFI_SWAP`, `LIFI` | Default. Uses `@lifi/sdk` with Arc Testnet chain registration. Intermittent on testnet. |
+| `ARC_APP_KIT_SWAP` | `APP_KIT_SWAP`, `APP_KIT` | Circle Stablecoin Service — requires testnet liquidity. |
+| `LIFI_DIRECT` | `LIFI_REST`, `LIFI_API` | LI.FI REST `/v1/quote` without SDK. Do **not** set `LIFI_API_KEY` or `LIFI_INTEGRATOR` (partner mode blocks the `fly` exchange). Intermittent. |
+| `CURVE_DIRECT` | `CURVE`, `CURVE_STABLE` | **Recommended for Arc Testnet.** Calls Curve WUSDC/EURC pool (`0x311d3f55…`) directly via `ArcSwapAdapter`. Quotes on-chain, no external API dependency. |
 
-- Default DCA provider is `ARC_LIFI_SWAP`.
-- To use Arc App Kit swap flow (`https://docs.arc.io/app-kit/swap`) from `.env`, set `DCA_ROUTE_PROVIDER=APP_KIT_SWAP` (or `ARC_APP_KIT_SWAP`).
-- Optional internal fallback can be enabled with `DCA_ROUTE_ALLOW_APP_KIT_FALLBACK=true`.
-- Fallback scope is Arc Testnet only. Keeper never switches DCA route resolution to another chain.
-- If LI.FI does not support Arc in the current environment, route resolution fails with explicit error.
-- App Kit credentials support both legacy and current names: `ARC_APP_KIT_API_KEY` (preferred) or `ARC_APP_KIT_KEY` (legacy). Only a `KIT_KEY:<id>:<secret>` value is sent as a bearer token; anything else is ignored and the request runs in permissionless mode.
-
-### App Kit swap execution model
-
-The Circle Stablecoin Service does not return a plain `to`/`data` pair. It returns signed
-`transaction.executionParams` plus a `signature` that must be submitted as a single
-`execute(ExecutionParams,TokenInput[],bytes)` call to the Circle adapter contract
-(`0xbbd70b01a1cabc96d5b7b129ae1aaabdf50dd40b` on Arc Testnet, selector `0xaa3e079c`).
-Replaying the inner `instructions` individually only runs the fee leg and never performs the swap.
-
-Before the first App Kit DCA run, whitelist that entrypoint once from the RecipeGuardrail owner wallet:
+### Recommended setup (Arc Testnet)
 
 ```bash
-node scripts/whitelist-appkit-swap-adapter.js
+DCA_ROUTE_PROVIDER=CURVE_DIRECT
 ```
 
-Users must keep their USDC allowance for `SHARED_EXECUTOR_PROXY_ADDRESS`, which pulls the
-per-execution amount and approves the adapter before the call.
+#### One-time on-chain setup (run once from RecipeGuardrail owner wallet)
 
-Legacy fallback swap construction (e.g. local `swapExactTokensForTokens` callData assembly from configured `targetProtocol`) is intentionally disabled to keep runtime behavior deterministic.
+```bash
+# Whitelist ArcSwapAdapter (required for all DCA providers except LIFI direct)
+node scripts/whitelist-appkit-swap-adapter.js
 
-API contract for `POST /recipes/register` with `recipeType=RECURRING_DCA`:
+# Whitelist Curve WUSDC/EURC pool (required for CURVE_DIRECT)
+node scripts/whitelist-curve-pool.js
 
-- `swapProvider` defaults to `ARC_LIFI_SWAP`.
-- `swapProvider=ARC_APP_KIT_SWAP` is accepted for legacy fallback scenarios.
+# Or whitelist all at once
+node scripts/whitelist-all-protocols.js
+```
+
+#### User USDC allowance
+
+Users must `approve` `ArcSwapAdapter` (`0xbbd70b01…`) for their per-execution USDC amount before
+DCA executes. The web SimulationModal shows current allowance and an **Approve USDC** button for
+each spender that needs approval.
+
+### Swap execution model (CURVE_DIRECT and ARC_APP_KIT_SWAP)
+
+The `CurveDirectDcaSwapRouteClient` wraps the Curve `exchange()` call inside an
+`ArcSwapAdapter.execute(instructions, tokenInputs, signature)` envelope. This lets the adapter
+internally approve the pool before calling `exchange`, avoiding the
+`ERC20: transfer amount exceeds allowance` revert that occurs when `RecipeExecutor` calls the pool
+directly without a prior approve.
+
+### API contract for `POST /recipes/register` with `recipeType=RECURRING_DCA`
+
+- `swapProvider` accepts `ARC_APP_KIT_SWAP` or `ARC_LIFI_SWAP`; defaults to `ARC_LIFI_SWAP`.
 - `targetProtocol` is not accepted.
 
 ## Endpoint smoke and cleanup for staging pipeline
